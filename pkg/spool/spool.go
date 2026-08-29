@@ -12,24 +12,27 @@ import (
 
 // Manager is the interface for managing local file spool.
 type Manager interface {
-	// Store stores data in the spool.
-	Store(userID string, filename string, data []byte) (FileRef, error)
-	
-	// Retrieve retrieves data from the spool.
-	Retrieve(userID string, fileID string) ([]byte, error)
-	
-	// Delete deletes a file from the spool.
-	Delete(userID string, fileID string) error
-	
-	// List lists all files in the spool for a user.
-	List(userID string) ([]FileRef, error)
-	
-	// Cleanup cleans up old files from the spool.
-	Cleanup(maxAge int) error
-	
-	// GetFileRef gets a file reference by userID and fileID.
-	GetFileRef(userID string, fileID string) (FileRef, error)
-}
+		// Store stores data in the spool.
+		Store(userID string, filename string, data []byte) (FileRef, error)
+		
+		// Retrieve retrieves data from the spool.
+		Retrieve(userID string, fileID string) ([]byte, error)
+		
+		// Delete deletes a file from the spool.
+		Delete(userID string, fileID string) error
+		
+		// List lists all files in the spool for a user.
+		List(userID string) ([]FileRef, error)
+		
+		// Cleanup cleans up old files from the spool.
+		Cleanup(maxAge int) error
+		
+		// GetFileRef gets a file reference by userID and fileID.
+		GetFileRef(userID string, fileID string) (FileRef, error)
+		
+		// GetUsage returns current usage and capacity information.
+		GetUsage() (used, capacity uint64, err error)
+	}
 
 // FileRef represents a reference to a spooled file.
 type FileRef struct {
@@ -195,6 +198,14 @@ func (m *defaultManager) Cleanup(maxAge int) error {
 	// In production, this would delete files older than maxAge
 	fmt.Printf("Cleanup with maxAge=%d - NOT IMPLEMENTED\n", maxAge)
 	return nil
+}
+
+// GetUsage returns current usage and capacity information.
+func (m *defaultManager) GetUsage() (used, capacity uint64, err error) {
+	// For now, return placeholder values
+	used = 0
+	capacity = m.maxSize
+	return used, capacity, nil
 }
 
 // GetFileRef implements Manager.GetFileRef.
