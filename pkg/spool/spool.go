@@ -106,26 +106,24 @@ func (m *defaultManager) Store(userID string, filename string, data []byte) (Fil
 	}
 
 	// Validate and clean userID to prevent path traversal
-	cleaneddUserID := filepath.Clean(userID)
-	var userDir string
-	if !strings.HasPrefix(cleaneddUserID, "..") && !strings.Contains(cleaneddUserID, "..") {
-		// If the cleaned path doesn't contain "..", verify it stays beneath the spool root
-		absSpoolDir, err := filepath.Abs(m.spoolDir)
-		if err != nil {
-			return FileRef{}, fmt.Errorf("failed to get absolute path for spool directory: %w", err)
-		}
-		userDir := filepath.Join(absSpoolDir, cleaneddUserID)
-		if !strings.HasPrefix(userDir, absSpoolDir) {
-			return FileRef{}, ErrPathTraversal
-		}
-	} else {
-		// If we have ".." in the path, it passed HasPrefix check but is still suspicious
+	if strings.HasPrefix(userID, "..") || strings.Contains(userID, "..") {
 		return FileRef{}, ErrPathTraversal
 	}
 
-	err := os.MkdirAll(userDir, 0750)
+	cleanUserID := filepath.Clean(userID)
+	absSpoolDir, err := filepath.Abs(m.spoolDir)
 	if err != nil {
-		return FileRef{}, fmt.Errorf("failed to create user directory: %w", err)
+		return FileRef{}, fmt.Errorf("failed to get absolute path for spool directory: %w", err)
+	}
+	userDir := filepath.Join(absSpoolDir, cleanUserID)
+	if !strings.HasPrefix(userDir, absSpoolDir) {
+		return FileRef{}, ErrPathTraversal
+	}
+
+	// Create user directory
+		mkdirErr := os.MkdirAll(userDir, 0750)
+	if mkdirErr != nil {
+		return FileRef{}, fmt.Errorf("failed to create user directory: %w", mkdirErr)
 	}
 
 	// Generate collision-resistant file ID using userID and filename
