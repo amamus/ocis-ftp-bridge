@@ -1,133 +1,87 @@
-// Package ftp provides the FTP server implementation for ocis-ftp-bridge.
+// Package ftp defines the bridge boundary around the selected FTP protocol library.
 //
-// It defines interfaces and types for the FTP layer which can be
-// implemented and tested independently of the actual FTP library.
+// FTP command parsing, control/data connection state, passive networking and FTPS
+// are provided by github.com/fclairamb/ftpserverlib. This package intentionally
+// does not mirror FTP commands with application-owned HandleUSER/HandleSTOR-style
+// interfaces. The bridge owns account mapping, virtual-root isolation, spool
+// semantics and downstream oCIS publication.
 package ftp
 
-// Server is the interface that wraps the basic FTP server methods.
+import (
+	"errors"
+
+	ftpserver "github.com/fclairamb/ftpserverlib"
+)
+
+const (
+	// ProtocolImplementation documents the selected FTP/FTPS protocol library.
+	ProtocolImplementation = "github.com/fclairamb/ftpserverlib"
+
+	// ProtocolVersion is pinned in go.mod and intentionally recorded here so
+	// diagnostics can report the protocol implementation used by a build.
+	ProtocolVersion = "v0.32.3"
+)
+
+// Server is the small lifecycle surface the application needs from ftpserverlib.
 type Server interface {
-	// Start starts the FTP server.
-	Start() error
-	
-	// Stop stops the FTP server.
-	Stop() error
-	
-	// ListenAndServe starts the FTP server and blocks until it's stopped.
+	Listen() error
 	ListenAndServe() error
-	
-	// SetHandler sets the handler for FTP commands.
-	SetHandler(Handler) error
+	Stop() error
+	Addr() string
 }
 
-// Handler is the interface that wraps the FTP command handling methods.
-type Handler interface {
-	// HandleSTOR handles the STOR (store) command to upload a file.
-	HandleSTOR(user string, fileName string, data []byte) error
-	
-	// HandleUSER handles the USER command for authentication.
-	HandleUSER(user string) error
-	
-	// HandlePASS handles the PASS command for authentication.
-	HandlePASS(password string) error
-	
-	// HandleQUIT handles the QUIT command to end the session.
-	HandleQUIT() error
-	
-	// HandlePASV handles the PASV command for passive mode.
-	HandlePASV() (string, int, error)
-	
-	// HandlePORT handles the PORT command for active mode.
-	HandlePORT(ip string, port int) error
-	
-	// HandleLIST handles the LIST command to list directory contents.
-	HandleLIST(path string) ([]byte, error)
-	
-	// HandleCWD handles the CWD command to change working directory.
-	HandleCWD(path string) error
-	
-	// HandlePWD handles the PWD command to get current directory.
-	HandlePWD() (string, error)
-	
-	// HandleDELE handles the DELE command to delete a file.
-	HandleDELE(path string) error
-	
-	// HandleRMD handles the RMD command to remove a directory.
-	HandleRMD(path string) error
-	
-	// HandleMKD handles the MKD command to create a directory.
-	HandleMKD(path string) error
-	
-	// HandleREST handles the REST command to restart a transfer.
-	HandleREST(offset int64) error
+// NewServer constructs the selected protocol server around a bridge MainDriver.
+func NewServer(driver ftpserver.MainDriver) Server {
+	return ftpserver.NewFtpServer(driver)
 }
 
-// Authenticator is the interface for user authentication.
+// Re-export only the extension points the bridge is expected to implement.
+// These aliases keep our architecture explicit without recreating FTP protocol APIs.
+type (
+	MainDriver          = ftpserver.MainDriver
+	ClientDriver        = ftpserver.ClientDriver
+	ClientContext       = ftpserver.ClientContext
+	FileTransfer        = ftpserver.FileTransfer
+	FileTransferError   = ftpserver.FileTransferError
+	Settings            = ftpserver.Settings
+	PortRange           = ftpserver.PortRange
+	TLSRequirement      = ftpserver.TLSRequirement
+)
+
+// Authenticator is a bridge-side credential abstraction. It is deliberately
+// separate from FTP command handling and will be backed by configured accounts.
 type Authenticator interface {
-	// Authenticate validates FTP credentials.
 	Authenticate(user, password string) (bool, error)
-	
-	// GetUserInfo returns information about an authenticated user.
 	GetUserInfo(user string) (UserInfo, error)
 }
 
-// UserInfo contains information about an authenticated user.
+// UserInfo is the minimal account information needed by the bridge.
 type UserInfo struct {
-	// UserID is the unique identifier for the user.
-	UserID string
-	
-	// OCISSpaceID is the oCIS space ID the user has access to.
+	UserID      string
 	OCISSpaceID string
-	
-	// Permissions are the user's permissions.
 	Permissions []string
 }
 
-// NewAuthenticator creates a new Authenticator instance.
-func NewAuthenticator(authConfig map[string]string) Authenticator {
-	// In a real implementation, this would connect to the auth backend
-	return &DefaultAuthenticator{config: authConfig}
+// NewAuthenticator returns an explicit unimplemented authenticator until the
+// account-mapping issue provides the real configured-account implementation.
+// It must never silently accept credentials.
+func NewAuthenticator(_ map[string]string) Authenticator {
+	return unsupportedAuthenticator{}
 }
 
-// DefaultAuthenticator is the default implementation of Authenticator.
-type DefaultAuthenticator struct {
-	config map[string]string
+type unsupportedAuthenticator struct{}
+
+func (unsupportedAuthenticator) Authenticate(string, string) (bool, error) {
+	return false, ErrNotImplemented
 }
 
-// Authenticate implements Authenticator.Authenticate.
-func (a *DefaultAuthenticator) Authenticate(user, password string) (bool, error) {
-	// Placeholder implementation
-	if user == "" || password == "" {
-		return false, ErrInvalidCredentials
-	}
-	return true, nil
-}
-
-// GetUserInfo implements Authenticator.GetUserInfo.
-func (a *DefaultAuthenticator) GetUserInfo(user string) (UserInfo, error) {
-	// Placeholder implementation
-	if user == "" {
-		return UserInfo{}, ErrUserNotFound
-	}
-	return UserInfo{
-		UserID:       user,
-		OCISSpaceID:  "placeholder-space-id",
-		Permissions:  []string{"read", "write"},
-	}, nil
-}
-
-// Errors
-type FTPError struct {
-	msg string
-}
-
-func (e *FTPError) Error() string {
-	return e.msg
+func (unsupportedAuthenticator) GetUserInfo(string) (UserInfo, error) {
+	return UserInfo{}, ErrNotImplemented
 }
 
 var (
-	ErrInvalidCredentials = &FTPError{msg: "invalid FTP credentials"}
-	ErrUserNotFound       = &FTPError{msg: "user not found"}
-	ErrUnauthorized       = &FTPError{msg: "access denied"}
-	ErrNotImplemented      = &FTPError{msg: "command not implemented"}
-	ErrSessionNotStarted  = &FTPError{msg: "FTP session not started"}
+	ErrInvalidCredentials = errors.New("invalid FTP credentials")
+	ErrUserNotFound        = errors.New("user not found")
+	ErrUnauthorized        = errors.New("access denied")
+	ErrNotImplemented      = errors.New("FTP account mapping not implemented")
 )
