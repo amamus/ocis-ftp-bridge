@@ -343,11 +343,17 @@ func parseArgon2ID(encoded string) (argon2Params, error) {
 	var err error
 	p.salt, err = base64.RawStdEncoding.DecodeString(parts[4])
 	if err != nil || len(p.salt) < 8 {
-		return p, errors.New("invalid Argon2id salt")
+		if err == nil {
+			return p, errors.New("invalid Argon2id salt")
+		}
+		return p, fmt.Errorf("invalid Argon2id salt: %w", err)
 	}
 	p.hash, err = base64.RawStdEncoding.DecodeString(parts[5])
 	if err != nil || len(p.hash) < 16 {
-		return p, errors.New("invalid Argon2id digest")
+		if err == nil {
+			return p, errors.New("invalid Argon2id digest")
+		}
+		return p, fmt.Errorf("invalid Argon2id digest: %w", err)
 	}
 	return p, nil
 }
