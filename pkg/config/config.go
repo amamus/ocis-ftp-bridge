@@ -140,7 +140,7 @@ type HTTPConfig struct {
 func New() *Config {
 	return &Config{
 		Server: ServerConfig{
-			Listen: ":2121",
+			Listen:  ":2121",
 			Passive: PassiveConfig{MinPort: 40000, MaxPort: 50000},
 		},
 		OCIS: OCISConfig{
@@ -173,10 +173,24 @@ func LoadFileWithEnv(filename string, lookupEnv func(string) (string, bool)) (*C
 
 	cfg := New()
 	dec := yaml.NewDecoder(f)
+
 	dec.KnownFields(true)
 	if err := dec.Decode(cfg); err != nil {
 		return nil, fmt.Errorf("decode configuration %q: %w", filename, err)
 	}
+
+	accountsMap := make(map[string]bool, len(cfg.Accounts))
+	for i := range cfg.Accounts {
+		account := &cfg.Accounts[i]
+		if strings.TrimSpace(account.Username) == "" {
+			return nil, fmt.Errorf("accounts[%d].username is required", i)
+		}
+		if _, exists := accountsMap[account.Username]; exists {
+			return nil, fmt.Errorf("duplicate FTP username %q", account.Username)
+		}
+		accountsMap[account.Username] = true
+	}
+
 	if err := cfg.validateWithEnv(lookupEnv); err != nil {
 		return nil, fmt.Errorf("validate configuration %q: %w", filename, err)
 	}
