@@ -1,96 +1,60 @@
-// Package auth provides authentication and account mapping for ocis-ftp-bridge.
-//
-// It bridges FTP credentials with oCIS user accounts and permissions.
+// Package auth maps configured FTP accounts to oCIS service credentials.
 package auth
 
-import "github.com/amamus/ocis-ftp-bridge/pkg/ftp"
+import (
+	"errors"
+	"fmt"
 
-// AccountMapper maps FTP credentials to oCIS accounts.
-type AccountMapper interface {
-	// MapFTPToOCIS maps FTP credentials to an oCIS account.
-	MapFTPToOCIS(user, password string) (OCISAccount, error)
-	
-	// ValidatePermissions validates that the user has access to the target space.
-	ValidatePermissions(account OCISAccount, spaceID string) error
+	"github.com/amamus/ocis-ftp-bridge/pkg/config"
+)
+
+var ErrInvalidCredentials = errors.New("invalid FTP credentials")
+
+type AccountMapping struct {
+	FTPUsername     string
+	OCISUsername    string
+	AppToken        string
+	DriveID         string
+	Drive           string
+	Root            string
+	CollisionPolicy string
+	MaxUploadSize   uint64
 }
 
-// OCISAccount represents an oCIS user account.
-type OCISAccount struct {
-	// ID is the unique identifier for the account.
-	ID string
-	
-	// Username is the account username.
-	Username string
-	
-	// Email is the account email address.
-	Email string
-	
-	// Token is the OAuth2 access token for the account.
-	Token string
-	
-	// Permissions are the account permissions.
-	Permissions []string
+func (m AccountMapping) String() string {
+	return fmt.Sprintf("AccountMapping{FTPUsername:%q OCISUsername:%q AppToken:<redacted> DriveID:%q Drive:%q Root:%q CollisionPolicy:%q MaxUploadSize:%d}",
+		m.FTPUsername, m.OCISUsername, m.DriveID, m.Drive, m.Root, m.CollisionPolicy, m.MaxUploadSize)
 }
 
-// NewAccountMapper creates a new AccountMapper instance.
-func NewAccountMapper(ftpClient ftp.Authenticator) AccountMapper {
-	return &defaultAccountMapper{ftpClient: ftpClient}
+type Mapper struct {
+	accounts map[string]config.AccountConfig
 }
 
-// defaultAccountMapper is the default implementation of AccountMapper.
-type defaultAccountMapper struct {
-	ftpClient ftp.Authenticator
-}
-
-// MapFTPToOCIS implements AccountMapper.MapFTPToOCIS.
-func (m *defaultAccountMapper) MapFTPToOCIS(user, password string) (OCISAccount, error) {
-	// Authenticate with FTP backend
-	if ok, err := m.ftpClient.Authenticate(user, password); err != nil {
-		return OCISAccount{}, err
-	} else if !ok {
-		return OCISAccount{}, ErrInvalidCredentials
+func NewAccountMapper(accounts []config.AccountConfig) *Mapper {
+	m := &Mapper{accounts: make(map[string]config.AccountConfig, len(accounts))}
+	for _, account := range accounts {
+		m.accounts[account.Username] = account
 	}
-	
-	// Get user info
-	userInfo, err := m.ftpClient.GetUserInfo(user)
-	if err != nil {
-		return OCISAccount{}, err
+	return m
+}
+
+func (m *Mapper) Authenticate(username, password string) (AccountMapping, error) {
+	account, ok := m.accounts[username]
+	if !ok {
+		return AccountMapping{}, ErrInvalidCredentials
 	}
-	
-	// Map to OCIS account (placeholder logic)
-	return OCISAccount{
-		ID:        userInfo.UserID,
-		Username:  user,
-		Email:     user + "@example.com",
-		Token:     "placeholder-token",
-		Permissions: userInfo.Permissions,
+	valid, err := config.VerifyPassword(account.PasswordHash, password)
+	if err != nil || !valid {
+		return AccountMapping{}, ErrInvalidCredentials
+	}
+	return AccountMapping{
+		FTPUsername:     account.Username,
+		OCISUsername:    account.OCIS.Username,
+		AppToken:        account.AppToken,
+		DriveID:         account.Target.DriveID,
+		Drive:           account.Target.Drive,
+		Root:            account.Target.Root,
+		CollisionPolicy: account.Upload.CollisionPolicy,
+		MaxUploadSize:   uint64(account.Upload.MaxSize),
 	}, nil
 }
-
-// ValidatePermissions implements AccountMapper.ValidatePermissions.
-func (m *defaultAccountMapper) ValidatePermissions(account OCISAccount, spaceID string) error {
-	// Validate that user has access to the space
-	for _, perm := range account.Permissions {
-		if perm == "write" || perm == "admin" {
-			return nil
-		}
-	}
-	
-	return ErrInsufficientPermissions
-}
-
-// Errors
-type AuthError struct {
-	msg string
-}
-
-func (e *AuthError) Error() string {
-	return e.msg
-}
-
-var (
-	ErrInvalidCredentials       = &AuthError{msg: "invalid FTP credentials"}
-	ErrUserNotFound            = &AuthError{msg: "user not found"}
-	ErrInsufficientPermissions = &AuthError{msg: "insufficient permissions"}
-	ErrMappingFailed          = &AuthError{msg: "failed to map FTP credentials to oCIS account"}
-)

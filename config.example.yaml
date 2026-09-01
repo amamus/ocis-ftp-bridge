@@ -4,7 +4,6 @@ server:
     min_port: 30000
     max_port: 30020
     public_ip: ""
-
   tls:
     enabled: false
     cert: /etc/ocis-ftp/tls.crt
@@ -19,7 +18,8 @@ spool:
 
 accounts:
   - username: reception
-    password_hash: "$argon2id$v=19$m=65536,t=3,p=1$6L3n2b9z5qY6b8f7cK9h2$8a8c6b4e3c1d9f3a2b1f1e4d5e6f7d8c9"
+    # Example-only syntactically valid Argon2id PHC value. Generate your own hash.
+    password_hash: "$argon2id$v=19$m=65536,t=3,p=1$MDEyMzQ1Njc4OWFiY2RlZg$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     ocis:
       username: scanner-service
       app_token_env: OCIS_FTP_RECEPTION_TOKEN
