@@ -10,7 +10,7 @@ server:
     cert: /etc/ocis-ftp/tls.crt
     key: /etc/ocis-ftp/tls.key
 
-ozis:
+ocis:
   url: https://cloud.example.com
 
 spool:
