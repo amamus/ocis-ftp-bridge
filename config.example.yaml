@@ -1,0 +1,32 @@
+server:
+  listen: ":21"
+  passive:
+    min_port: 30000
+    max_port: 30020
+    public_ip: ""
+  tls:
+    enabled: false
+    cert: /etc/ocis-ftp/tls.crt
+    key: /etc/ocis-ftp/tls.key
+
+ocis:
+  url: https://cloud.example.com
+
+spool:
+  directory: /var/lib/ocis-ftp/spool
+  max_total_size: 2GiB
+
+accounts:
+  - username: reception
+    # Example-only syntactically valid Argon2id PHC value. Generate your own hash.
+    password_hash: "$argon2id$v=19$m=65536,t=3,p=1$MDEyMzQ1Njc4OWFiY2RlZg$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    ocis:
+      username: scanner-service
+      app_token_env: OCIS_FTP_RECEPTION_TOKEN
+    target:
+      drive_id: ""
+      drive: "Incoming Scans"
+      root: "/Reception"
+    upload:
+      collision_policy: rename
+      max_size: 250MiB
