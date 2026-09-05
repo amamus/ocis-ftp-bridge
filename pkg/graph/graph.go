@@ -46,6 +46,9 @@ type Drive struct {
 	
 	// Root is the root of the drive.
 	Root Root `json:"root"`
+
+	// WebDAVURL is the WebDAV endpoint URL for this drive.
+	WebDAVURL string `json:"web_dav_url,omitempty"`
 }
 
 // Space represents an oCIS space.
@@ -111,8 +114,16 @@ const (
 )
 
 // NewClient creates a new LibreGraph client.
+// This function creates a client that uses the official LibreGraph Go SDK.
+// For backward compatibility, it still returns the Client interface.
 func NewClient(baseURL, token string) Client {
-	return &defaultClient{baseURL: baseURL, token: token}
+	return NewLibreGraphClient(baseURL, "", token)
+}
+
+// NewClientWithCredentials creates a new LibreGraph client with username and token.
+// This is the preferred method for authentication as LibreGraph API uses BasicAuth.
+func NewClientWithCredentials(baseURL, username, token string) Client {
+	return NewLibreGraphClient(baseURL, username, token)
 }
 
 // defaultClient is the default implementation of Client.
@@ -224,4 +235,5 @@ var (
 	ErrUnauthorized         = &GraphError{msg: "unauthorized"}
 	ErrForbidden            = &GraphError{msg: "forbidden"}
 	ErrGraphAPIError        = &GraphError{msg: "LibreGraph API error"}
+	ErrNotImplemented       = &GraphError{msg: "operation not implemented"}
 )
