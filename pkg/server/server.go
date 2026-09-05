@@ -8,8 +8,10 @@ package server
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/amamus/ocis-ftp-bridge/pkg/config"
+	"github.com/amamus/ocis-ftp-bridge/pkg/ftp"
 	"github.com/amamus/ocis-ftp-bridge/pkg/graph"
 	"github.com/amamus/ocis-ftp-bridge/pkg/observability"
 	"github.com/amamus/ocis-ftp-bridge/pkg/spool"
@@ -27,6 +29,8 @@ type service struct {
 	spoolManager spool.Manager
 	graphClient  graph.Client
 	webdavClient webdav.Client
+	ftpServer    ftp.Server
+	wg           sync.WaitGroup
 }
 
 // New validates configuration and constructs the issue #1 service foundation.
@@ -47,12 +51,23 @@ func New(cfg *config.Config, obs observability.Client) (Server, error) {
 		return nil, fmt.Errorf("failed to start observability: %w", err)
 	}
 
+	// Create graph client with placeholder credentials (will be configured per-account)
+	graphClient := graph.NewClient(cfg.OCIS.GraphURL, "placeholder-token")
+
+	// Create webdav client with placeholder credentials (will be configured per-account)
+	webdavClient := webdav.NewClient(cfg.OCIS.WebDAVURL, "placeholder-token")
+
+	// Initialize FTP server
+	ftpDriver := ftp.NewBridgeDriver(cfg, obs, spoolMgr, graphClient)
+	ftpServer := ftp.NewServer(ftpDriver)
+
 	return &service{
 		cfg:          cfg,
 		obs:          obs,
 		spoolManager: spoolMgr,
-		graphClient:  graph.NewClient(cfg.OCIS.GraphURL, "placeholder-token"),
-		webdavClient: webdav.NewClient(cfg.OCIS.WebDAVURL, "placeholder-token"),
+		graphClient:  graphClient,
+		webdavClient: webdavClient,
+		ftpServer:    ftpServer,
 	}, nil
 }
 
@@ -69,17 +84,56 @@ func initializeSpool(cfg *config.Config) (spool.Manager, error) {
 	return mgr, nil
 }
 
-// Run keeps the service foundation alive until shutdown is requested.
-// Real FTP listener wiring is intentionally deferred to issue #6.
+// Run starts the FTP server and keeps the service alive until shutdown is requested.
 func (s *service) Run(ctx context.Context) error {
-	s.obs.Log("info", "starting ocis-ftp-bridge")
+	s.obs.Log("info", fmt.Sprintf("starting ocis-ftp-bridge on %s with passive ports %d-%d",
+		s.cfg.Server.Listen, s.cfg.Server.Passive.MinPort, s.cfg.Server.Passive.MaxPort))
+
+	// Start FTP server in a goroutine
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		if err := s.runFTPServer(ctx); err != nil {
+			s.obs.Log("error", fmt.Sprintf("FTP server failed: %v", err))
+		}
+	}()
+
+	// Wait for shutdown
 	<-ctx.Done()
+
 	s.obs.Log("info", "shutting down ocis-ftp-bridge")
+
+	// Shutdown FTP server
+	if err := s.stopFTPServer(); err != nil {
+		s.obs.Log("error", fmt.Sprintf("FTP server shutdown error: %v", err))
+	}
+
+	// Wait for FTP server to stop
+	s.wg.Wait()
 
 	if err := s.obs.Stop(); err != nil {
 		return fmt.Errorf("failed to stop observability: %w", err)
 	}
 	return nil
+}
+
+// runFTPServer runs the FTP server on the configured address.
+func (s *service) runFTPServer(ctx context.Context) error {
+	// The FTP server will use the ListenAddr from GetSettings()
+	s.obs.Log("info", fmt.Sprintf("FTP server starting on %s", s.cfg.Server.Listen))
+
+	// Start serving FTP connections
+	err := s.ftpServer.ListenAndServe()
+	if err != nil {
+		return fmt.Errorf("FTP server failed: %w", err)
+	}
+
+	return nil
+}
+
+// stopFTPServer stops the FTP server.
+func (s *service) stopFTPServer() error {
+	return s.ftpServer.Stop()
 }
 
 type ServerError struct {
