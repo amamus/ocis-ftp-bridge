@@ -13,6 +13,7 @@ import (
 	"github.com/amamus/ocis-ftp-bridge/pkg/config"
 	"github.com/amamus/ocis-ftp-bridge/pkg/ftp"
 	"github.com/amamus/ocis-ftp-bridge/pkg/graph"
+	"github.com/amamus/ocis-ftp-bridge/pkg/http"
 	"github.com/amamus/ocis-ftp-bridge/pkg/observability"
 	"github.com/amamus/ocis-ftp-bridge/pkg/spool"
 	"github.com/amamus/ocis-ftp-bridge/pkg/webdav"
@@ -24,13 +25,14 @@ type Server interface {
 }
 
 type service struct {
-	cfg          *config.Config
-	obs          observability.Client
-	spoolManager spool.Manager
-	graphClient  graph.Client
-	webdavClient webdav.Client
-	ftpServer    ftp.Server
-	wg           sync.WaitGroup
+	cfg            *config.Config
+	obs            observability.Client
+	spoolManager   spool.Manager
+	graphClient    graph.Client
+	webdavClient   webdav.Client
+	ftpServer      ftp.Server
+	httpServer     http.Server
+	wg             sync.WaitGroup
 }
 
 // New validates configuration and constructs the issue #1 service foundation.
@@ -61,13 +63,17 @@ func New(cfg *config.Config, obs observability.Client) (Server, error) {
 	ftpDriver := ftp.NewBridgeDriver(cfg, obs, spoolMgr, graphClient)
 	ftpServer := ftp.NewServer(ftpDriver)
 
+	// Initialize HTTP operations server
+	httpServer := http.NewOperationsServer(cfg.HTTP.Address)
+
 	return &service{
-		cfg:          cfg,
-		obs:          obs,
-		spoolManager: spoolMgr,
-		graphClient:  graphClient,
-		webdavClient: webdavClient,
-		ftpServer:    ftpServer,
+		cfg:            cfg,
+		obs:            obs,
+		spoolManager:   spoolMgr,
+		graphClient:    graphClient,
+		webdavClient:   webdavClient,
+		ftpServer:      ftpServer,
+		httpServer:     httpServer,
 	}, nil
 }
 
@@ -84,7 +90,7 @@ func initializeSpool(cfg *config.Config) (spool.Manager, error) {
 	return mgr, nil
 }
 
-// Run starts the FTP server and keeps the service alive until shutdown is requested.
+// Run starts the FTP and HTTP servers and keeps the service alive until shutdown is requested.
 func (s *service) Run(ctx context.Context) error {
 	s.obs.Log("info", fmt.Sprintf("starting ocis-ftp-bridge on %s with passive ports %d-%d",
 		s.cfg.Server.Listen, s.cfg.Server.Passive.MinPort, s.cfg.Server.Passive.MaxPort))
@@ -98,6 +104,19 @@ func (s *service) Run(ctx context.Context) error {
 		}
 	}()
 
+	// Start HTTP operations server in a goroutine
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		if err := s.runHTTPServer(ctx); err != nil {
+			s.obs.Log("error", fmt.Sprintf("HTTP server failed: %v", err))
+		}
+	}()
+
+	// Log service startup info
+	s.obs.Log("info", fmt.Sprintf("HTTP operations server started on %s", s.cfg.HTTP.Address))
+	s.obs.Log("info", "Endpoints available: /healthz, /readyz, /metrics")
+
 	// Wait for shutdown
 	<-ctx.Done()
 
@@ -108,7 +127,12 @@ func (s *service) Run(ctx context.Context) error {
 		s.obs.Log("error", fmt.Sprintf("FTP server shutdown error: %v", err))
 	}
 
-	// Wait for FTP server to stop
+	// Shutdown HTTP server
+	if err := s.stopHTTPServer(); err != nil {
+		s.obs.Log("error", fmt.Sprintf("HTTP server shutdown error: %v", err))
+	}
+
+	// Wait for all servers to stop
 	s.wg.Wait()
 
 	if err := s.obs.Stop(); err != nil {
@@ -129,6 +153,17 @@ func (s *service) runFTPServer(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// runHTTPServer runs the HTTP operations server
+func (s *service) runHTTPServer(ctx context.Context) error {
+	s.obs.Log("info", fmt.Sprintf("HTTP operations server starting on %s", s.cfg.HTTP.Address))
+	return s.httpServer.Run(ctx)
+}
+
+// stopHTTPServer stops the HTTP operations server
+func (s *service) stopHTTPServer() error {
+	return s.httpServer.Stop()
 }
 
 // stopFTPServer stops the FTP server.
