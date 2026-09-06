@@ -119,11 +119,9 @@ func (c *libregraphClient) ResolveDrive(id string) (Drive, error) {
 }
 
 // ListDrives lists all drives for the authenticated user.
+// When userID is empty, it uses the /me/drives endpoint for the current authenticated user.
+// When userID is provided, it uses the /users/{userID}/drives endpoint.
 func (c *libregraphClient) ListDrives(userID string) ([]Drive, error) {
-	if userID == "" {
-		return nil, ErrInvalidUserID
-	}
-
 	// Check if apiClient is properly initialized
 	if c.apiClient == nil {
 		return nil, fmt.Errorf("graph client not properly initialized: %w", ErrGraphAPIError)
@@ -172,13 +170,16 @@ func (c *libregraphClient) ListSpaces(userID string) ([]Space, error) {
 	return []Space{}, nil
 }
 
-// SearchDrives searches for drives by name for a specific user.
+// SearchDrives searches for drives by name for the authenticated user.
+// When userID is empty, it uses the /me/drives endpoint for the current authenticated user.
+// name must not be empty.
 func (c *libregraphClient) SearchDrives(userID, name string) ([]Drive, error) {
-	if userID == "" || name == "" {
+	if name == "" {
 		return nil, ErrInvalidParameters
 	}
 
 	// List all drives and filter by name
+	// userID can be empty to use /me/drives endpoint
 	drives, err := c.ListDrives(userID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list drives for search: %w", err)
@@ -317,8 +318,10 @@ func (c *libregraphClient) safeString(s *string) string {
 
 // ValidateConfiguration validates that the LibreGraph client can connect to the API.
 // This can be used during startup to verify configuration.
+// It uses the /me/drives endpoint to test connectivity with the authenticated user.
 func (c *libregraphClient) ValidateConfiguration() error {
 	// Try to list drives to validate the connection
+	// Pass empty userID to use /me/drives endpoint
 	_, err := c.ListDrives("")
 	if err != nil {
 		return fmt.Errorf("LibreGraph configuration validation failed: %w", err)
