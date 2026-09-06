@@ -119,33 +119,18 @@ func (c *libregraphClient) ResolveDrive(id string) (Drive, error) {
 }
 
 // ListDrives lists all drives for the authenticated user.
+// When userID is empty, it uses the /me/drives endpoint for the current authenticated user.
+// When userID is provided, it uses the /users/{userID}/drives endpoint.
 func (c *libregraphClient) ListDrives(userID string) ([]Drive, error) {
-	if userID == "" {
-		return nil, ErrInvalidUserID
-	}
-
 	// Check if apiClient is properly initialized
 	if c.apiClient == nil {
 		return nil, fmt.Errorf("graph client not properly initialized: %w", ErrGraphAPIError)
 	}
 
-	var resp *libregraph.DriveList
-	var httpResp *http.Response
-	var err error
-
-	// Use different endpoints based on whether userID is provided
-	if userID == "" {
-		// Use /me/drives endpoint for current authenticated user
-		resp, httpResp, err = c.apiClient.MeDrivesApi.ListMyDrives(
-			c.withAuth(context.Background()),
-		).Execute()
-	} else {
-		// Use /users/{userID}/drives endpoint for specific user
-		resp, httpResp, err = c.apiClient.DrivesApi.ListDrives(
-			c.withAuth(context.Background()),
-			userID,
-		).Execute()
-	}
+	// Use the me/drives endpoint to get drives for the current user
+	resp, httpResp, err := c.apiClient.MeDrivesApi.ListMyDrives(
+		c.withAuth(context.Background()),
+	).Execute()
 	
 	if err != nil {
 		return nil, c.handleError(httpResp, err, "failed to list drives")
@@ -185,13 +170,16 @@ func (c *libregraphClient) ListSpaces(userID string) ([]Space, error) {
 	return []Space{}, nil
 }
 
-// SearchDrives searches for drives by name for a specific user.
+// SearchDrives searches for drives by name for the authenticated user.
+// When userID is empty, it uses the /me/drives endpoint for the current authenticated user.
+// name must not be empty.
 func (c *libregraphClient) SearchDrives(userID, name string) ([]Drive, error) {
-	if userID == "" || name == "" {
+	if name == "" {
 		return nil, ErrInvalidParameters
 	}
 
 	// List all drives and filter by name
+	// userID can be empty to use /me/drives endpoint
 	drives, err := c.ListDrives(userID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list drives for search: %w", err)
@@ -269,30 +257,12 @@ func (c *libregraphClient) convertDrive(drive *libregraph.Drive) Drive {
 	// Extract WebDAV URL from the drive's webUrl if available
 	webDAVURL := ""
 	if drive.WebUrl != nil && *drive.WebUrl != "" {
-		// Convert web URL to WebDAV URL, preserving drive ID
+		// Convert web URL to WebDAV URL
 		webURL, err := url.Parse(*drive.WebUrl)
 		if err == nil {
-			// Extract drive ID from the path and construct drive-specific WebDAV URL
-			// Path typically looks like /d/abc-def-123/ or /drive/abc-def-123
-			pathParts := strings.FieldsFunc(webURL.Path, func(r rune) bool {
-				return r == '/' || r == '\'
-			})
-			
-			// Find the drive ID (typically a UUID or similar identifier)
-			var driveID string
-			for _, part := range pathParts {
-				if part != "" && part != "d" && part != "drive" && len(part) >= 8 {
-					// Looks like a drive ID
-					driveID = part
-					break
-				}
-			}
-			
-			if driveID != "" {
-				// Construct drive-specific WebDAV URL: /d/{driveID}/webdav or /drive/{driveID}/webdav
-				webURL.Path = "/d/" + driveID + "/webdav"
-				webDAVURL = webURL.String()
-			}
+			// Replace the path with /webdav
+			webURL.Path = "/webdav"
+			webDAVURL = webURL.String()
 		}
 	}
 
@@ -348,8 +318,10 @@ func (c *libregraphClient) safeString(s *string) string {
 
 // ValidateConfiguration validates that the LibreGraph client can connect to the API.
 // This can be used during startup to verify configuration.
+// It uses the /me/drives endpoint to test connectivity with the authenticated user.
 func (c *libregraphClient) ValidateConfiguration() error {
 	// Try to list drives to validate the connection
+	// Pass empty userID to use /me/drives endpoint
 	_, err := c.ListDrives("")
 	if err != nil {
 		return fmt.Errorf("LibreGraph configuration validation failed: %w", err)
