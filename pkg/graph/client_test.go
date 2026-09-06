@@ -40,15 +40,10 @@ func TestLibreGraphClient_ResolveDrive_EmptyID(t *testing.T) {
 func TestLibreGraphClient_ListDrives_EmptyUserID(t *testing.T) {
 	t.Parallel()
 
-	// Empty userID should now be allowed - it uses /me/drives endpoint
-	// This test is updated to verify that empty userID works for /me/drives
 	client := NewLibreGraphClient("http://localhost:9200/api/libregraph", "user", "token")
-	// This will fail due to connection, not due to empty userID validation
 	_, err := client.ListDrives("")
-	// We expect a connection error, not an ErrInvalidUserID error
 	require.Error(t, err)
-	// The error should NOT be ErrInvalidUserID since empty userID is now allowed
-	assert.NotEqual(t, ErrInvalidUserID, err)
+	assert.Equal(t, ErrInvalidUserID, err)
 }
 
 func TestLibreGraphClient_SearchDrives_InvalidParameters(t *testing.T) {
@@ -56,14 +51,12 @@ func TestLibreGraphClient_SearchDrives_InvalidParameters(t *testing.T) {
 
 	client := NewLibreGraphClient("http://localhost:9200/api/libregraph", "user", "token")
 
-	// Test with empty userID - should now be allowed (uses /me/drives)
-	// This will fail due to connection, not parameter validation
+	// Test with empty userID
 	_, err := client.SearchDrives("", "test")
 	require.Error(t, err)
-	// The error should NOT be ErrInvalidParameters since empty userID is now allowed
-	assert.NotEqual(t, ErrInvalidParameters, err)
+	assert.Equal(t, ErrInvalidParameters, err)
 
-	// Test with empty name - should still fail with ErrInvalidParameters
+	// Test with empty name
 	_, err = client.SearchDrives("user1", "")
 	require.Error(t, err)
 	assert.Equal(t, ErrInvalidParameters, err)
@@ -275,7 +268,7 @@ func TestLibreGraphClient_WithMockServer(t *testing.T) {
 	// Note: server.URL gives us the base URL, and we need to append the libregraph path
 	client := NewLibreGraphClient(server.URL+"/api/libregraph", "testuser", "testtoken")
 
-	// Test ListDrives with explicit userID
+	// Test ListDrives
 	drives, err := client.ListDrives("testuser")
 	require.NoError(t, err)
 	require.Len(t, drives, 1)
@@ -283,12 +276,6 @@ func TestLibreGraphClient_WithMockServer(t *testing.T) {
 	assert.Equal(t, "Test Drive", drives[0].Name)
 	// WebDAV URL should be derived from webUrl
 	assert.Equal(t, "http://localhost:9200/webdav", drives[0].WebDAVURL)
-
-	// Test ListDrives with empty userID (uses /me/drives)
-	drives, err = client.ListDrives("")
-	require.NoError(t, err)
-	require.Len(t, drives, 1)
-	assert.Equal(t, "drive1", drives[0].ID)
 
 	// Test ResolveDrive
 	drive, err := client.ResolveDrive("drive1")

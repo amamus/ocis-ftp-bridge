@@ -85,33 +85,6 @@ func NewBridgeDriver(
 		})
 	}
 
-	// Validate and warn about TLS configuration for security
-	if cfg.Server.TLS.Enabled {
-		// Validate TLS files exist and are readable at startup
-		if _, err := os.Stat(cfg.Server.TLS.Cert); os.IsNotExist(err) {
-			obs.Log("error", fmt.Sprintf("TLS certificate file %q does not exist", cfg.Server.TLS.Cert))
-			return nil
-		}
-		if _, err := os.Stat(cfg.Server.TLS.Key); os.IsNotExist(err) {
-			obs.Log("error", fmt.Sprintf("TLS private key file %q does not exist", cfg.Server.TLS.Key))
-			return nil
-		}
-		obs.Log("info", fmt.Sprintf("TLS enabled with cert: %s, key: %s", cfg.Server.TLS.Cert, cfg.Server.TLS.Key))
-	} else {
-		// Warn about plain FTP usage - this is a security risk
-		obs.Log("warn", "PLAIN FTP ENABLED: This is insecure. Credentials and file contents are unencrypted. "+
-			"Use TLS for production deployments. Configure server.tls.enabled: true with valid cert/key files.")
-	}
-
-	// Validate passive mode configuration
-	if cfg.Server.Passive.PublicIP != "" {
-		obs.Log("info", fmt.Sprintf("Passive mode configured with public IP: %s, port range: %d-%d",
-			cfg.Server.Passive.PublicIP, cfg.Server.Passive.MinPort, cfg.Server.Passive.MaxPort))
-	} else {
-		obs.Log("info", fmt.Sprintf("Passive mode configured with port range: %d-%d (using system IP)",
-			cfg.Server.Passive.MinPort, cfg.Server.Passive.MaxPort))
-	}
-
 	return &BridgeDriver{
 		cfg:           cfg,
 		obs:          obs,
