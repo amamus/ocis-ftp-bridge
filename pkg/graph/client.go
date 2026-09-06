@@ -127,10 +127,23 @@ func (c *libregraphClient) ListDrives(userID string) ([]Drive, error) {
 		return nil, fmt.Errorf("graph client not properly initialized: %w", ErrGraphAPIError)
 	}
 
-	// Use the me/drives endpoint to get drives for the current user
-	resp, httpResp, err := c.apiClient.MeDrivesApi.ListMyDrives(
-		c.withAuth(context.Background()),
-	).Execute()
+	var resp *libregraph.DriveList
+	var httpResp *http.Response
+	var err error
+
+	// Use different endpoints based on whether userID is provided
+	if userID == "" {
+		// Use /me/drives endpoint for current authenticated user
+		resp, httpResp, err = c.apiClient.MeDrivesApi.ListMyDrives(
+			c.withAuth(context.Background()),
+		).Execute()
+	} else {
+		// Use /users/{userID}/drives endpoint for specific user
+		resp, httpResp, err = c.apiClient.DrivesApi.ListDrives(
+			c.withAuth(context.Background()),
+			userID,
+		).Execute()
+	}
 	
 	if err != nil {
 		return nil, c.handleError(httpResp, err, "failed to list drives")
@@ -257,12 +270,30 @@ func (c *libregraphClient) convertDrive(drive *libregraph.Drive) Drive {
 	// Extract WebDAV URL from the drive's webUrl if available
 	webDAVURL := ""
 	if drive.WebUrl != nil && *drive.WebUrl != "" {
-		// Convert web URL to WebDAV URL
+		// Convert web URL to WebDAV URL, preserving drive ID
 		webURL, err := url.Parse(*drive.WebUrl)
 		if err == nil {
-			// Replace the path with /webdav
-			webURL.Path = "/webdav"
-			webDAVURL = webURL.String()
+			// Extract drive ID from the path and construct drive-specific WebDAV URL
+			// Path typically looks like /d/abc-def-123/ or /drive/abc-def-123
+			pathParts := strings.FieldsFunc(webURL.Path, func(r rune) bool {
+				return r == '/' || r == '\'
+			})
+			
+			// Find the drive ID (typically a UUID or similar identifier)
+			var driveID string
+			for _, part := range pathParts {
+				if part != "" && part != "d" && part != "drive" && len(part) >= 8 {
+					// Looks like a drive ID
+					driveID = part
+					break
+				}
+			}
+			
+			if driveID != "" {
+				// Construct drive-specific WebDAV URL: /d/{driveID}/webdav or /drive/{driveID}/webdav
+				webURL.Path = "/d/" + driveID + "/webdav"
+				webDAVURL = webURL.String()
+			}
 		}
 	}
 
