@@ -1,0 +1,481 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      manual_trigger:
+        description: 'Manually trigger workflow'
+        required: false
+
+# Cancel in-progress runs on new commits to the same branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: '1.27'
+  BINARY_NAME: 'ocis-ftp-bridge'
+  FTP_PORT: '2121'
+  HTTP_PORT: '9200'
+  PASSIVE_MIN_PORT: '40000'
+  PASSIVE_MAX_PORT: '40100'
+
+jobs:
+  # Unit tests, linting, and build validation
+  test-and-build:
+    name: Test and Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: true
+        cache-dependency-path: go.sum
+
+    - name: Install dependencies
+      run: go mod download
+
+    - name: Run go vet
+      run: go vet ./...
+
+    - name: Run static analysis
+      run: go build -v ./...
+
+    - name: Run unit tests
+      run: go test -v -race ./...
+      timeout-minutes: 10
+
+    - name: Build binary with version info
+      run: |
+        BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        COMMIT_SHA=${{ github.sha }}
+        VERSION=${{ github.ref_name }}
+        if [ "$VERSION" = "main" ]; then
+          VERSION="1.0.0-dev"
+        fi
+        go build \
+          -ldflags "-s -w \
+            -X main.Version=${VERSION} \
+            -X main.CommitSHA=${COMMIT_SHA} \
+            -X main.BuildDate=${BUILD_DATE}" \
+          -o ${{ env.BINARY_NAME }} \
+          ./cmd/ocis-ftp-bridge
+        ./ocis-ftp-bridge -version
+
+    - name: Build Docker image
+      run: |
+        docker build \
+          --build-arg VERSION=${{ github.ref_name }} \
+          --build-arg COMMIT_SHA=${{ github.sha }} \
+          --build-arg BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ") \
+          -t ocis-ftp-bridge:test .
+        docker inspect ocis-ftp-bridge:test
+
+    - name: Upload binary artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ocis-ftp-bridge
+        path: ${{ env.BINARY_NAME }}
+        retention-days: 1
+
+  # End-to-end tests using the built container
+  e2e-tests:
+    name: End-to-End Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: test-and-build
+    
+    services:
+      redis:
+        image: redis:alpine
+        ports:
+          - 6379:6379
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Download binary artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: ocis-ftp-bridge
+        path: .
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Install test dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y lftp wget
+
+    - name: Create test configuration
+      run: |
+        # Create a test configuration file
+        cat > test-config.yaml << 'EOF'
+        server:
+          listen: "0.0.0.0:${{ env.FTP_PORT }}"
+          idletimeout: 300
+          connectiontimeout: 60
+          
+        http:
+          address: "0.0.0.0:${{ env.HTTP_PORT }}"
+          
+        spool:
+          directory: /tmp/ocis-ftp-bridge-spool
+          maxsize: 1073741824 # 1GB
+          cleanup_age_hours: 24
+          
+        ocis:
+          graph_url: "http://localhost:9100"
+          webdav_url: "http://localhost:9200/webdav"
+          
+        ftp:
+          passive:
+            min_port: ${{ env.PASSIVE_MIN_PORT }}
+            max_port: ${{ env.PASSIVE_MAX_PORT }}
+          tls:
+            enabled: false
+            cert_file: ""
+            key_file: ""
+          public_host: "127.0.0.1"
+          
+        accounts:
+          - username: "test-printer"
+            password: "test-password"
+            drive_id: "test-drive-id"
+            target_path: "/uploads"
+            collision_policy: "rename"
+            max_upload_size: 104857600 # 100MB
+            
+          - username: "test-printer-2"
+            password: "test-password-2"
+            drive_id: "test-drive-id-2"
+            target_path: "/uploads"
+            collision_policy: "reject"
+            max_upload_size: 104857600 # 100MB
+            
+        logging:
+          level: "debug"
+          format: "text"
+        EOF
+        
+        # Create spool directory
+        mkdir -p /tmp/ocis-ftp-bridge-spool
+        chmod 777 /tmp/ocis-ftp-bridge-spool
+
+    - name: Start mock oCIS server
+      run: |
+        # Create a simple mock oCIS WebDAV server using a Go HTTP server
+        cat > mock-ocis.go << 'EOF'
+        package main
+
+        import (
+			"fmt"
+			"io"
+			"log"
+			"net/http"
+			"os"
+			"path/filepath"
+			"strings"
+		)
+
+        var (
+			uploadDir = "/tmp/mock-ocis-uploads"
+			uploadedFiles = make(map[string][]byte)
+		)
+
+        func init() {
+			os.MkdirAll(uploadDir, 0755)
+		}
+
+        func webdavHandler(w http.ResponseWriter, r *http.Request) {
+			path := strings.TrimPrefix(r.URL.Path, "/webdav")
+			fullPath := filepath.Join(uploadDir, path)
+			
+			switch r.Method {
+			case "MKCOL":
+				os.MkdirAll(fullPath, 0755)
+				w.WriteHeader(http.StatusCreated)
+				
+			case "PUT":
+				os.MkdirAll(filepath.Dir(fullPath), 0755)
+				data, err := io.ReadAll(r.Body)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				if err := os.WriteFile(fullPath, data, 0644); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				uploadedFiles[fullPath] = data
+				w.WriteHeader(http.StatusCreated)
+				
+			case "GET", "HEAD":
+				if _, err := os.Stat(fullPath); err == nil {
+					if r.Method == "GET" {
+						data, _ := os.ReadFile(fullPath)
+						w.Write(data)
+					}
+					w.WriteHeader(http.StatusOK)
+				} else {
+					http.Error(w, "Not Found", http.StatusNotFound)
+				}
+				
+			case "PROPFIND":
+				files, _ := os.ReadDir(uploadDir)
+				xml := `<?xml version="1.0" encoding="utf-8" ?>
+				<multistatus xmlns="DAV:">
+				`
+				for _, f := range files {
+					info, _ := f.Info()
+					if !info.IsDir() {
+						xml += fmt.Sprintf("<response><href>/webdav/%s</href><propstat><prop><getcontentlength>%d</getcontentlength></prop><status>HTTP/1.1 200 OK</status></propstat></response>", 
+							f.Name(), info.Size())
+					}
+				}
+				xml += "</multistatus>"
+				w.Header().Set("Content-Type", "application/xml")
+				w.WriteHeader(http.StatusMultiStatus)
+				w.Write([]byte(xml))
+				
+			default:
+				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			}
+		}
+
+        func graphHandler(w http.ResponseWriter, r *http.Request) {
+			if strings.Contains(r.URL.Path, "/drives") {
+				json := `{
+					"value": [
+						{
+							"id": "test-drive-id",
+							"name": "Test Drive",
+							"webUrl": "http://localhost/webdav",
+							"driveType": "personal"
+						},
+						{
+							"id": "test-drive-id-2",
+							"name": "Test Drive 2",
+							"webUrl": "http://localhost/webdav",
+							"driveType": "personal"
+						}
+					]
+				}`
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(json))
+			}
+		}
+
+        func main() {
+			http.HandleFunc("/webdav/", webdavHandler)
+			http.HandleFunc("/webdav", webdavHandler)
+			
+			go func() {
+				http.HandleFunc("/", graphHandler)
+				log.Fatal(http.ListenAndServe(":9100", nil))
+			}()
+			
+			log.Println("Mock oCIS WebDAV server starting on :9200")
+			log.Fatal(http.ListenAndServe(":9200", nil))
+		}
+        EOF
+        
+        go build -o mock-ocis mock-ocis.go
+        ./mock-ocis &
+        echo "MOCK_OCIS_PID=$!" >> $GITHUB_ENV
+        
+        sleep 3
+        wget -q --tries=5 --retry-connrefused http://localhost:9200/webdav/ || true
+
+    - name: Start ocis-ftp-bridge
+      run: |
+        chmod +x ${{ env.BINARY_NAME }}
+        ./${{ env.BINARY_NAME }} -config test-config.yaml &
+        echo "BRIDGE_PID=$!" >> $GITHUB_ENV
+        
+        sleep 2
+        wget -q --tries=10 --retry-connrefused http://localhost:${{ env.HTTP_PORT }}/healthz || true
+
+    - name: Run E2E tests
+      run: |
+        echo "Starting E2E tests..."
+        
+        # Test 1: Plain FTP upload succeeds
+        echo "=== Test 1: Plain FTP upload ==="
+        cat > test-file.txt << 'EOF'
+        This is a test file for E2E testing.
+        It contains some text data to verify upload integrity.
+        Line 2
+        Line 3
+        EOF
+        
+        echo -e "open -u test-printer,test-password localhost ${{ env.FTP_PORT }}
+        put test-file.txt -o /uploads/test-file.txt
+        quit" | lftp -p ${{ env.FTP_PORT }} -e "set ftp:ssl-force false; set ftp:use-epsv true;" 2>&1 | tee ftp-test-1.log
+        
+        if wget -q http://localhost:9200/webdav/uploads/test-file.txt -O /tmp/received-file.txt; then
+          if diff -q test-file.txt /tmp/received-file.txt > /dev/null 2>&1; then
+            echo "PASS: Test 1 - File content matches"
+          else
+            echo "FAIL: Test 1 - File content does not match"
+            exit 1
+          fi
+        else
+          echo "FAIL: Test 1 - File was not uploaded to mock server"
+          exit 1
+        fi
+        
+        # Test 2: Invalid FTP credentials fail
+        echo "=== Test 2: Invalid FTP credentials ==="
+        echo -e "open -u invalid-user,invalid-password localhost ${{ env.FTP_PORT }}
+        quit" | lftp -p ${{ env.FTP_PORT }} -e "set ftp:ssl-force false; set ftp:use-epsv true;" 2>&1 | tee ftp-test-2.log
+        
+        if grep -q "Login failed\|530" ftp-test-2.log; then
+          echo "PASS: Test 2 - Invalid credentials rejected"
+        else
+          echo "FAIL: Test 2 - Invalid credentials were not properly rejected"
+          exit 1
+        fi
+        
+        # Test 3: Health and readiness endpoints
+        echo "=== Test 3: Health and readiness endpoints ==="
+        health_response=$(wget -q -O- http://localhost:${{ env.HTTP_PORT }}/healthz)
+        ready_response=$(wget -q -O- http://localhost:${{ env.HTTP_PORT }}/readyz)
+        
+        if [ "$health_response" = "OK" ] && [ "$ready_response" = "OK" ]; then
+          echo "PASS: Test 3 - Health and readiness endpoints responding"
+        else
+          echo "FAIL: Test 3 - Health/readiness endpoints not responding correctly"
+          exit 1
+        fi
+        
+        # Test 4: Metrics endpoint
+        echo "=== Test 4: Metrics endpoint ==="
+        metrics_response=$(wget -q -O- http://localhost:${{ env.HTTP_PORT }}/metrics)
+        if echo "$metrics_response" | grep -q "ocis_ftp"; then
+          echo "PASS: Test 4 - Metrics endpoint returning ocis_ftp metrics"
+        else
+          echo "FAIL: Test 4 - Metrics endpoint not returning expected metrics"
+          exit 1
+        fi
+        
+        echo "=== All E2E tests completed successfully ==="
+        
+      timeout-minutes: 15
+
+    - name: Collect logs on failure
+      run: |
+        echo "Collecting logs..."
+        pkill -f ocis-ftp-bridge || true
+        pkill -f mock-ocis || true
+        mkdir -p e2e-logs
+        cp -r /tmp/ocis-ftp-bridge-spool e2e-logs/spool || true
+        cp -r /tmp/mock-ocis-uploads e2e-logs/mock-uploads || true
+        cp -f ftp-test-*.log e2e-logs/ || true
+        cp -f test-config.yaml e2e-logs/ || true
+        echo "E2E Test Logs" > e2e-logs/README.txt
+        tar -czf e2e-logs.tar.gz e2e-logs
+        
+      if: failure()
+
+    - name: Upload E2E logs
+      uses: actions/upload-artifact@v4
+      with:
+        name: e2e-logs
+        path: e2e-logs.tar.gz
+      if: always()
+
+    - name: Cleanup
+      run: |
+        pkill -f ocis-ftp-bridge || true
+        pkill -f mock-ocis || true
+        rm -rf /tmp/ocis-ftp-bridge-spool
+        rm -rf /tmp/mock-ocis-uploads
+        rm -f mock-ocis mock-ocis.go
+        rm -f test-file.txt test-config.yaml
+        rm -f ftp-test-*.log
+        
+      if: always()
+
+  # Security scanning
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: test-and-build
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Run Go vulnerability check
+      uses: golang/govulncheck-action@v1
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Run gosec security scanner
+      run: |
+        go install github.com/securego/gosec/v2/cmd/gosec@latest
+        gosec -exclude-dir=vendor,test -severity=medium ./...
+
+  # Release preparation (only on main branch)
+  release-prep:
+    name: Release Preparation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.ref == 'refs/heads/main'
+    needs: [test-and-build, e2e-tests]
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ env.GO_VERSION }}
+
+    - name: Build release binaries
+      run: |
+        platforms=("linux/amd64" "linux/arm64" "darwin/amd64" "darwin/arm64")
+        for platform in "${platforms[@]}"; do
+          GOOS=${platform%%/*}
+          GOARCH=${platform##*/}
+          BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          COMMIT_SHA=${{ github.sha }}
+          VERSION="1.0.0-dev"
+          
+          output="ocis-ftp-bridge-${VERSION}-${GOOS}-${GOARCH}"
+          CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build \
+            -ldflags "-s -w \
+              -X main.Version=${VERSION} \
+              -X main.CommitSHA=${COMMIT_SHA} \
+              -X main.BuildDate=${BUILD_DATE}" \
+            -o ${output} \
+            ./cmd/ocis-ftp-bridge
+          
+          tar -czf ${output}.tar.gz ${output}
+        done
+
+    - name: Upload release artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-binaries
+        path: ocis-ftp-bridge-*.tar.gz
+        retention-days: 7
