@@ -22,7 +22,6 @@ import (
 	"github.com/amamus/ocis-ftp-bridge/pkg/graph"
 	"github.com/amamus/ocis-ftp-bridge/pkg/observability"
 	"github.com/amamus/ocis-ftp-bridge/pkg/spool"
-	"github.com/amamus/ocis-ftp-bridge/pkg/transfer"
 	"github.com/amamus/ocis-ftp-bridge/pkg/webdav"
 )
 
@@ -34,7 +33,6 @@ type BridgeDriver struct {
 	obs          observability.Client
 	spoolManager spool.Manager
 	graphClient  graph.Client
-	transferManager *transfer.TransferManager
 
 	// Client management
 	activeConnections int64
@@ -70,54 +68,11 @@ func NewBridgeDriver(
 		accounts[cfg.Accounts[i].Username] = &cfg.Accounts[i]
 	}
 
-	// Create transfer manager for path mapping and collision handling
-	transferMgr := transfer.NewTransferManager()
-	
-	// Add target configurations for each account
-	for i := range cfg.Accounts {
-		account := &cfg.Accounts[i]
-		transferMgr.AddTarget(account.Username, transfer.TargetConfig{
-			DriveID:          account.Target.DriveID,
-			Drive:           account.Target.Drive,
-			Root:            account.Target.Root,
-			CollisionPolicy: transfer.CollisionPolicy(account.Upload.CollisionPolicy),
-			MaxSize:         uint64(account.Upload.MaxSize),
-		})
-	}
-
-	// Validate and warn about TLS configuration for security
-	if cfg.Server.TLS.Enabled {
-		// Validate TLS files exist and are readable at startup
-		if _, err := os.Stat(cfg.Server.TLS.Cert); os.IsNotExist(err) {
-			obs.Log("error", fmt.Sprintf("TLS certificate file %q does not exist", cfg.Server.TLS.Cert))
-			return nil
-		}
-		if _, err := os.Stat(cfg.Server.TLS.Key); os.IsNotExist(err) {
-			obs.Log("error", fmt.Sprintf("TLS private key file %q does not exist", cfg.Server.TLS.Key))
-			return nil
-		}
-		obs.Log("info", fmt.Sprintf("TLS enabled with cert: %s, key: %s", cfg.Server.TLS.Cert, cfg.Server.TLS.Key))
-	} else {
-		// Warn about plain FTP usage - this is a security risk
-		obs.Log("warn", "PLAIN FTP ENABLED: This is insecure. Credentials and file contents are unencrypted. "+
-			"Use TLS for production deployments. Configure server.tls.enabled: true with valid cert/key files.")
-	}
-
-	// Validate passive mode configuration
-	if cfg.Server.Passive.PublicIP != "" {
-		obs.Log("info", fmt.Sprintf("Passive mode configured with public IP: %s, port range: %d-%d",
-			cfg.Server.Passive.PublicIP, cfg.Server.Passive.MinPort, cfg.Server.Passive.MaxPort))
-	} else {
-		obs.Log("info", fmt.Sprintf("Passive mode configured with port range: %d-%d (using system IP)",
-			cfg.Server.Passive.MinPort, cfg.Server.Passive.MaxPort))
-	}
-
 	return &BridgeDriver{
 		cfg:           cfg,
 		obs:          obs,
 		spoolManager:  spoolManager,
 		graphClient:   graphClient,
-		transferManager: transferMgr,
 		accounts:      accounts,
 		maxConnections: cfg.Server.MaxConnections,
 		shutdownChan:  make(chan struct{}),
@@ -563,41 +518,29 @@ func (c *bridgeClientDriver) generateUploadID() string {
 
 // handleUploadOpen is called when a client sends STOR command
 func (c *bridgeClientDriver) handleUploadOpen(path string) (*uploadWriter, error) {
-	// Use transfer manager for proper path mapping and collision handling
-	filename := filepath.Base(path)
-	
-	// Create transfer request
-	request := transfer.TransferRequest{
-		UserID:   c.user,
-		Filename: filename,
-		Path:     filepath.Dir(path),
-		Size:     -1, // unknown size initially
-	}
-
-	// Process the upload request to get the final target path
-	transferResult := c.bridgeDriver.transferManager.ProcessUpload(request)
-	if !transferResult.Success {
-		c.bridgeDriver.obs.Log("warn", fmt.Sprintf("Transfer processing failed for user %s, path %s: %v", 
-			c.user, path, transferResult.Error))
-		return nil, transferResult.Error
+	// Normalize and validate the path
+	targetPath, err := c.normalizeUploadPath(path)
+	if err != nil {
+		c.bridgeDriver.obs.Log("warn", fmt.Sprintf("Invalid upload path for user %s, path %s: %v", c.user, path, err))
+		return nil, err
 	}
 
 	// Generate a unique upload ID
 	uploadID := c.generateUploadID()
 
-	// Start the upload in spool using the resolved target path
+	// Start the upload in spool
 	uploadManager := c.bridgeDriver.spoolManager.GetUploadManager()
 	
 	upload, err := uploadManager.StartUpload(
 		c.context,
 		c.user,
-		transferResult.Filename, // final filename (may be modified for collision handling)
-		transferResult.TargetPath, // final target path
+		filepath.Base(targetPath), // filename
+		targetPath,
 		-1, // unknown size initially, will be updated as we receive data
 		uint64(c.account.Upload.MaxSize), // account max size
 	)
 	if err != nil {
-		c.bridgeDriver.obs.Log("error", fmt.Sprintf("Failed to start upload for user %s, path %s: %v", c.user, path, err))
+		c.bridgeDriver.obs.Log("error", fmt.Sprintf("Failed to start upload for user %s, path %s: %v", c.user, targetPath, err))
 		return nil, err
 	}
 
@@ -606,7 +549,6 @@ func (c *bridgeClientDriver) handleUploadOpen(path string) (*uploadWriter, error
 		upload:    upload,
 		startTime: time.Now(),
 		lastChunk: time.Now(),
-		path:      transferResult.TargetPath,
 	}
 
 	// Store the upload for later reference
@@ -624,7 +566,7 @@ func (c *bridgeClientDriver) handleUploadOpen(path string) (*uploadWriter, error
 	}
 
 	c.bridgeDriver.obs.Log("info", fmt.Sprintf("Upload started for user %s, upload %s, target %s, filename %s",
-		c.user, uploadID, transferResult.TargetPath, transferResult.Filename))
+		c.user, uploadID, targetPath, filepath.Base(targetPath)))
 
 	// Increment upload counter
 	atomic.AddUint64(&c.bridgeDriver.uploadsTotal, 1)
@@ -750,25 +692,25 @@ func (w *uploadWriter) Close() error {
 }
 
 // commitToWebDAV commits a spooled file to WebDAV and handles the required path mapping.
-// This uses the transfer manager for proper path mapping, collision handling, and directory creation.
+// This is a basic implementation that will be enhanced in Issue #7 with proper path mapping.
 func (w *uploadWriter) commitToWebDAV(fileRef spool.FileRef) error {
-	// Get the resolved target path from the spool upload (set during handleUploadOpen)
-	// This path already includes proper path mapping and collision resolution
-	finalPath := w.spoolUpload.path
-	if finalPath == "" {
-		// Fallback to the fileRef target path
-		finalPath = fileRef.TargetPath
-		if finalPath == "" {
-			// Last fallback: use the filename relative to account root
-			finalPath = filepath.Join(w.clientDriver.account.Target.Root, filepath.Base(fileRef.Filename))
-		}
+	// Get the target path from the upload
+	// In a proper implementation (Issue #7), this would handle:
+	// - Path mapping from FTP path to oCIS path
+	// - Directory creation
+	// - Collision policies (rename, reject, overwrite)
+	// For now, we use a basic approach
+	
+	// The fileRef.TargetPath contains the target path from the upload
+	targetPath := fileRef.TargetPath
+	if targetPath == "" {
+		// If no target path, use just the filename
+		targetPath = filepath.Base(fileRef.Filename)
 	}
 
-	// Ensure parent directories exist
-	err := w.clientDriver.bridgeDriver.transferManager.EnsureParentDirectories(finalPath)
-	if err != nil {
-		return fmt.Errorf("failed to ensure parent directories: %w", err)
-	}
+	// Ensure the target path is relative to the account's target root
+	// This will be properly handled in Issue #7
+	finalPath := filepath.Join(w.clientDriver.account.Target.Root, targetPath)
 
 	// Open the spooled file for reading
 	fileData, err := os.ReadFile(fileRef.Path)
@@ -777,8 +719,9 @@ func (w *uploadWriter) commitToWebDAV(fileRef spool.FileRef) error {
 	}
 
 	// Upload to WebDAV
-	// The collision policy is already handled by the transfer manager during path resolution
-	// We use overwrite=true here since the transfer manager has already resolved any collisions
+	// Note: This uses the basic WebDAV client Upload method
+	// In Issue #7, this will be enhanced with proper directory creation and collision handling
+	// For now, we default to overwrite=true to ensure the upload succeeds
 	err = w.clientDriver.webdavClient.Upload(w.clientDriver.context, finalPath, fileData, true)
 	if err != nil {
 		return fmt.Errorf("WebDAV upload failed: %w", err)
