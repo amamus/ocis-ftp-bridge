@@ -50,6 +50,7 @@ func (r *targetResolver) ResolveTarget(driveID, driveName string) (Drive, string
 
 	// Rule 2: If only drive name is configured, exactly one matching drive must exist.
 	if driveName != "" {
+		// Pass empty userID to use /me/drives endpoint for the current authenticated user
 		matches, err := r.client.SearchDrives("", driveName)
 		if err != nil {
 			return Drive{}, "", fmt.Errorf("failed to search drives by name %q: %w", driveName, err)
