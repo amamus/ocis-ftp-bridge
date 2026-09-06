@@ -122,6 +122,10 @@ func (c *libregraphClient) ResolveDrive(id string) (Drive, error) {
 // When userID is empty, it uses the /me/drives endpoint for the current authenticated user.
 // When userID is provided, it uses the /users/{userID}/drives endpoint.
 func (c *libregraphClient) ListDrives(userID string) ([]Drive, error) {
+	if userID == "" {
+		return nil, ErrInvalidUserID
+	}
+
 	// Check if apiClient is properly initialized
 	if c.apiClient == nil {
 		return nil, fmt.Errorf("graph client not properly initialized: %w", ErrGraphAPIError)
@@ -170,11 +174,9 @@ func (c *libregraphClient) ListSpaces(userID string) ([]Space, error) {
 	return []Space{}, nil
 }
 
-// SearchDrives searches for drives by name for the authenticated user.
-// When userID is empty, it uses the /me/drives endpoint for the current authenticated user.
-// name must not be empty.
+// SearchDrives searches for drives by name for a specific user.
 func (c *libregraphClient) SearchDrives(userID, name string) ([]Drive, error) {
-	if name == "" {
+	if userID == "" || name == "" {
 		return nil, ErrInvalidParameters
 	}
 
