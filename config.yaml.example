@@ -1,0 +1,146 @@
+# ocis-ftp-bridge Configuration Example
+#
+# This is an example configuration file for the ocis-ftp-bridge service.
+# Copy this file to config.yaml and customize for your environment.
+#
+# IMPORTANT: This file contains sensitive information. Ensure proper file
+# permissions (readable only by the service account) and consider using
+# Kubernetes Secrets or similar mechanisms for production deployments.
+
+# ============================================================================
+# Server Configuration
+# ============================================================================
+server:
+  # FTP server listen address
+  listen: ":2121"
+  
+  # Maximum number of concurrent FTP connections
+  max_connections: 100
+  
+  # Passive FTP mode configuration
+  passive:
+    # Range of ports for passive FTP data connections
+    min_port: 40000
+    max_port: 50000
+    
+    # Public IP address for passive connections (required for NAT/container deployments)
+    # This is the IP that FTP clients will connect to for data transfers
+    # If not set, the server will use the detected system IP
+    public_ip: "192.168.1.100"
+  
+  # TLS configuration for explicit FTPS
+  tls:
+    # Enable TLS for explicit FTPS (AUTH TLS)
+    enabled: false
+    
+    # Path to TLS certificate file (PEM format)
+    # Required when enabled: true
+    cert: "/etc/ssl/certs/ocis-ftp-bridge.crt"
+    
+    # Path to TLS private key file (PEM format)
+    # Required when enabled: true
+    key: "/etc/ssl/private/ocis-ftp-bridge.key"
+
+# ============================================================================
+# oCIS Configuration
+# ============================================================================
+ocis:
+  # Base URL for oCIS
+  url: "https://ocis.example.com"
+  
+  # LibreGraph API URL (optional - defaults to ${url}/api/libregraph)
+  graph_url: "https://ocis.example.com/api/libregraph"
+  
+  # WebDAV API URL (optional - defaults to ${url}/webdav)
+  webdav_url: "https://ocis.example.com/webdav"
+
+# ============================================================================
+# Spool Configuration
+# ============================================================================
+spool:
+  # Directory for temporary upload storage
+  # Must be writable by the service account
+  directory: "/var/spool/ocis-ftp-bridge"
+  
+  # Maximum total size of all files in spool (prevents disk exhaustion)
+  max_total_size: 10GiB
+
+# ============================================================================
+# Observability Configuration
+# ============================================================================
+observability:
+  # Enable debug-level logging
+  debug: false
+
+# ============================================================================
+# HTTP Operations Server Configuration
+# ============================================================================
+http:
+  # Address for health, readiness, and metrics endpoints
+  address: ":9200"
+
+# ============================================================================
+# FTP Account Configuration
+# ============================================================================
+# Each account represents an FTP user that can upload files to oCIS
+accounts:
+  # Example printer account
+  - username: "hp-printer"
+    
+    # Argon2id password hash (use: htpasswd -B -C 12 -i -d password | tr -d '\n')
+    # Or use a tool like: go run cmd/hash-password/main.go
+    password_hash: "$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJC1OeqncgJ2almHUfLnhtRTVrjD8zGQ"
+    
+    # oCIS credentials
+    ocis:
+      # oCIS username (service account with App Token)
+      username: "ftp-service-account"
+      
+      # Environment variable containing the oCIS App Token
+      # This is more secure than storing the token directly in the config
+      app_token_env: "OCIS_APP_TOKEN"
+    
+    # Target configuration
+    target:
+      # Drive ID or Drive Name (authoritative if set)
+      drive_id: ""
+      drive: "Printer Uploads"
+      
+      # Root path in the drive for uploads
+      root: "/scans"
+    
+    # Upload configuration
+    upload:
+      # Collision policy: "rename", "reject", or "overwrite"
+      collision_policy: "rename"
+      
+      # Maximum file size for uploads
+      max_size: 100MiB
+
+  # Example scanner account
+  - username: "scanner1"
+    password_hash: "$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJC1OeqncgJ2almHUfLnhtRTVrjD8zGQ"
+    
+    ocis:
+      username: "scanner-service-account"
+      app_token_env: "SCANNER_OCIS_APP_TOKEN"
+    
+    target:
+      drive: "Scanner Documents"
+      root: "/incoming"
+    
+    upload:
+      collision_policy: "reject"
+      max_size: 500MiB
+
+# ============================================================================
+# Notes
+# ============================================================================
+# 1. For production deployments, set observability.debug: false
+# 2. Use strong, unique passwords for each FTP account
+# 3. Store App Tokens in environment variables or Kubernetes Secrets
+# 4. Configure TLS for FTPS in production
+# 5. Ensure spool directory has sufficient disk space
+# 6. Monitor the /metrics endpoint for operational insights
+# 7. Test passive FTP connectivity from your network
+# 8. Consider rate limiting and connection limits based on your workload
