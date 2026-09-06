@@ -144,6 +144,11 @@ func New() *Config {
 			Listen:          ":2121",
 			Passive:         PassiveConfig{MinPort: 40000, MaxPort: 50000},
 			MaxConnections:  100,
+			// TLS is disabled by default for development convenience
+			// Production deployments should enable TLS explicitly
+			TLS: TLSConfig{
+				Enabled: false,
+			},
 		},
 		OCIS: OCISConfig{
 			URL:       "http://localhost:9200",

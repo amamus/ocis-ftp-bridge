@@ -1,0 +1,344 @@
+# ocis-ftp-bridge Kubernetes Deployment
+#
+# This example demonstrates how to deploy the ocis-ftp-bridge in Kubernetes
+# for printer/scanner FTP ingestion into oCIS.
+#
+# Usage:
+#   kubectl apply -f kubernetes/
+#
+# Note: This example uses placeholder values. Replace with your actual
+# configuration and adjust resource requirements as needed.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ocis-ftp-bridge
+  labels:
+    app: ocis-ftp-bridge
+    component: ftp-bridge
+
+---
+# Service Account with minimal permissions
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ocis-ftp-bridge
+  namespace: ocis-ftp-bridge
+  labels:
+    app: ocis-ftp-bridge
+
+---
+# ConfigMap for configuration (minimal example - use Secrets for sensitive data)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ocis-ftp-bridge-config
+  namespace: ocis-ftp-bridge
+  labels:
+    app: ocis-ftp-bridge
+
+data:
+  config.yaml: |
+    server:
+      listen: ":2121"
+      max_connections: 100
+      passive:
+        min_port: 40000
+        max_port: 50000
+        # public_ip: "10.0.0.100"  # Set to the external IP if behind NAT
+      tls:
+        enabled: false
+        # cert: "/etc/ssl/certs/tls.crt"
+        # key: "/etc/ssl/private/tls.key"
+    
+    http:
+      address: ":9200"
+    
+    ocis:
+      url: "https://ocis.ocis.svc.cluster.local:9200"
+      graph_url: "https://ocis.ocis.svc.cluster.local:9200/api/libregraph"
+      webdav_url: "https://ocis.ocis.svc.cluster.local:9200/webdav"
+    
+    spool:
+      directory: "/var/spool/ocis-ftp-bridge"
+      max_total_size: 10GiB
+    
+    observability:
+      debug: false
+    
+    # Account configurations would go here
+    # accounts:
+    #   - username: "printer1"
+    #     password_hash: "$argon2id$v=19$m=65536,t=3,p=4$..."
+    #     ocis:
+    #       username: "service-account"
+    #       app_token_env: "OCIS_APP_TOKEN"
+    #     target:
+    #       drive: "Printer Uploads"
+    #       root: "/uploads"
+    #     upload:
+    #       collision_policy: "rename"
+    #       max_size: 100MiB
+
+---
+# Persistent Volume Claim for spool storage
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ocis-ftp-bridge-spool
+  namespace: ocis-ftp-bridge
+  labels:
+    app: ocis-ftp-bridge
+
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: standard  # Adjust to your cluster's storage class
+
+---
+# Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ocis-ftp-bridge
+  namespace: ocis-ftp-bridge
+  labels:
+    app: ocis-ftp-bridge
+    component: ftp-bridge
+
+spec:
+  replicas: 1  # Single replica for simplicity; scale if needed
+  
+  selector:
+    matchLabels:
+      app: ocis-ftp-bridge
+      component: ftp-bridge
+  
+  template:
+    metadata:
+      labels:
+        app: ocis-ftp-bridge
+        component: ftp-bridge
+        version: "1.0.0"
+      
+      annotations:
+        # Reload when config changes
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    
+    spec:
+      # Run as non-root for security
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: "OnRootMismatch"
+        
+      serviceAccountName: ocis-ftp-bridge
+      
+      containers:
+      - name: ocis-ftp-bridge
+        image: ghcr.io/amamus/ocis-ftp-bridge:latest
+        imagePullPolicy: IfNotPresent
+        
+        # Ports
+        ports:
+        - name: ftp
+          containerPort: 2121
+          protocol: TCP
+        - name: passive-min
+          containerPort: 40000
+          protocol: TCP
+        - name: passive-max
+          containerPort: 50000
+          protocol: TCP
+        - name: http
+          containerPort: 9200
+          protocol: TCP
+        
+        # Resource requests and limits
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "1000m"
+        
+        # Liveness and readiness probes
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+          successThreshold: 1
+        
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+          successThreshold: 1
+        
+        # Security context for the container
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+        
+        # Volume mounts
+        volumeMounts:
+        - name: config
+          mountPath: /app/config
+          readOnly: true
+        - name: spool
+          mountPath: /var/spool/ocis-ftp-bridge
+        - name: tmp
+          mountPath: /tmp
+        
+        # Environment variables
+        env:
+        - name: TZ
+          value: UTC
+        - name: CONFIG_FILE
+          value: /app/config/config.yaml
+        
+        # Command and arguments
+        command: ["/app/bin/ocis-ftp-bridge"]
+        args: ["-config", "/app/config/config.yaml"]
+      
+      # Volumes
+      volumes:
+      - name: config
+        configMap:
+          name: ocis-ftp-bridge-config
+      - name: spool
+        persistentVolumeClaim:
+          claimName: ocis-ftp-bridge-spool
+      - name: tmp
+        emptyDir:
+          sizeLimit: 100Mi
+
+---
+# Service for FTP access
+apiVersion: v1
+kind: Service
+metadata:
+  name: ocis-ftp-bridge-ftp
+  namespace: ocis-ftp-bridge
+  labels:
+    app: ocis-ftp-bridge
+    component: ftp-bridge
+
+spec:
+  type: LoadBalancer
+  selector:
+    app: ocis-ftp-bridge
+    component: ftp-bridge
+  
+  ports:
+  - name: ftp
+    port: 2121
+    targetPort: 2121
+    protocol: TCP
+
+---
+# Service for HTTP operations (health, metrics)
+apiVersion: v1
+kind: Service
+metadata:
+  name: ocis-ftp-bridge-http
+  namespace: ocis-ftp-bridge
+  labels:
+    app: ocis-ftp-bridge
+    component: ftp-bridge
+
+spec:
+  type: ClusterIP
+  selector:
+    app: ocis-ftp-bridge
+    component: ftp-bridge
+  
+  ports:
+  - name: http
+    port: 9200
+    targetPort: 9200
+    protocol: TCP
+
+---
+# Service for passive FTP port range (if using NodePort or LoadBalancer)
+# Note: FTP passive mode requires special handling in Kubernetes.
+# This is an example configuration that may need adjustment based on your environment.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ocis-ftp-bridge-passive
+  namespace: ocis-ftp-bridge
+  labels:
+    app: ocis-ftp-bridge
+    component: ftp-bridge
+
+spec:
+  type: LoadBalancer
+  selector:
+    app: ocis-ftp-bridge
+    component: ftp-bridge
+  
+  ports:
+  - name: passive-40000
+    port: 40000
+    targetPort: 40000
+    protocol: TCP
+  - name: passive-40001
+    port: 40001
+    targetPort: 40001
+    protocol: TCP
+  # Note: Kubernetes doesn't support port ranges in Services.
+  # For full passive port range support, consider using a NodePort service
+  # with a custom external load balancer or FTP-aware ingress controller.
+
+---
+# Horizontal Pod Autoscaler (optional)
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ocis-ftp-bridge-hpa
+  namespace: ocis-ftp-bridge
+  labels:
+    app: ocis-ftp-bridge
+
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ocis-ftp-bridge
+  
+  minReplicas: 1
+  maxReplicas: 3
+  
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80

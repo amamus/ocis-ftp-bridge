@@ -155,12 +155,9 @@ func (c *defaultClient) ResolveDrive(id string) (Drive, error) {
 }
 
 // ListDrives implements Client.ListDrives.
+// userID can be empty to indicate the current authenticated user.
 func (c *defaultClient) ListDrives(userID string) ([]Drive, error) {
-	if userID == "" {
-		return nil, ErrInvalidUserID
-	}
-	
-	// Placeholder implementation
+	// Placeholder implementation - would use /me/drives for empty userID
 	return []Drive{}, nil
 }
 
@@ -197,8 +194,10 @@ func (c *defaultClient) ListSpaces(userID string) ([]Space, error) {
 }
 
 // SearchDrives implements Client.SearchDrives.
+// userID can be empty to indicate the current authenticated user.
+// name must not be empty.
 func (c *defaultClient) SearchDrives(userID, name string) ([]Drive, error) {
-	if userID == "" || name == "" {
+	if name == "" {
 		return nil, ErrInvalidParameters
 	}
 	
