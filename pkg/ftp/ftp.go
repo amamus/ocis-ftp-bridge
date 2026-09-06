@@ -84,4 +84,8 @@ var (
 	ErrUserNotFound        = errors.New("user not found")
 	ErrUnauthorized        = errors.New("access denied")
 	ErrNotImplemented      = errors.New("FTP account mapping not implemented")
+	// ErrOperationNotSupported is returned when an operation is not supported
+	ErrOperationNotSupported = errors.New("operation not supported")
+	// ErrPathTraversal is returned when path traversal is detected
+	ErrPathTraversal = errors.New("path traversal detected")
 )

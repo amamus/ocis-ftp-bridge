@@ -75,9 +75,10 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Listen  string        `yaml:"listen" json:"listen"`
-	Passive PassiveConfig `yaml:"passive" json:"passive"`
-	TLS     TLSConfig     `yaml:"tls" json:"tls"`
+	Listen        string        `yaml:"listen" json:"listen"`
+	Passive       PassiveConfig `yaml:"passive" json:"passive"`
+	TLS           TLSConfig     `yaml:"tls" json:"tls"`
+	MaxConnections int         `yaml:"max_connections,omitempty" json:"max_connections,omitempty"`
 }
 
 type PassiveConfig struct {
@@ -140,8 +141,14 @@ type HTTPConfig struct {
 func New() *Config {
 	return &Config{
 		Server: ServerConfig{
-			Listen:  ":2121",
-			Passive: PassiveConfig{MinPort: 40000, MaxPort: 50000},
+			Listen:          ":2121",
+			Passive:         PassiveConfig{MinPort: 40000, MaxPort: 50000},
+			MaxConnections:  100,
+			// TLS is disabled by default for development convenience
+			// Production deployments should enable TLS explicitly
+			TLS: TLSConfig{
+				Enabled: false,
+			},
 		},
 		OCIS: OCISConfig{
 			URL:       "http://localhost:9200",

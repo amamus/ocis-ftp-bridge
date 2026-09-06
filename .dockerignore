@@ -1,0 +1,48 @@
+# Ignore files and directories that should not be included in the Docker image
+
+# Git
+.git
+.gitignore
+
+# Build artifacts
+bin/
+build/
+dist/
+
+# Dependency directories
+go.mod
+go.sum
+vendor/
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Test files
+*_test.go
+.test
+
+# Documentation (can be added via separate stage if needed)
+docs/
+README.md
+CHANGELOG.md
+CONTRIBUTING.md
+
+# Example configuration files
+*.example
+*.sample
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+*~
