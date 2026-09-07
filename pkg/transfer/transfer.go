@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/amamus/ocis-ftp-bridge/pkg/errors"
 	"github.com/amamus/ocis-ftp-bridge/pkg/webdav"
 )
 
@@ -133,7 +134,7 @@ func (tm *TransferManager) GetTarget(userID string) (TargetConfig, bool) {
 func (tm *TransferManager) CalculateTargetPath(userID, ftpPath, filename string) (string, error) {
 	config, exists := tm.GetTarget(userID)
 	if !exists {
-		return "", fmt.Errorf("no target configuration for user %s", userID)
+		return "", errors.NotFound("target configuration", userID)
 	}
 
 	// Start with the target root
@@ -177,12 +178,12 @@ func (tm *TransferManager) normalizeFTPPath(path string) (string, error) {
 
 	// Check for path traversal in original path
 	if strings.Contains(path, "..") {
-		return "", fmt.Errorf("path traversal not allowed: %s", path)
+		return "", errors.PathTraversal(path)
 	}
 
 	// Check for absolute paths in original path
 	if strings.HasPrefix(path, "/") {
-		return "", fmt.Errorf("absolute paths not allowed: %s", path)
+		return "", errors.PathTraversal(path)
 	}
 
 	// Remove leading slashes first (should not be needed now, but for safety)
@@ -198,7 +199,7 @@ func (tm *TransferManager) normalizeFTPPath(path string) (string, error) {
 
 	// Double-check for path traversal after cleaning
 	if strings.Contains(cleanPath, "..") {
-		return "", fmt.Errorf("path traversal not allowed: %s", path)
+		return "", errors.PathTraversal(path)
 	}
 
 	return cleanPath, nil
@@ -208,14 +209,14 @@ func (tm *TransferManager) normalizeFTPPath(path string) (string, error) {
 // while preserving Unicode characters
 func (tm *TransferManager) sanitizeFilename(filename string) (string, error) {
 	if filename == "" {
-		return "", fmt.Errorf("filename cannot be empty")
+		return "", errors.InvalidInput("filename cannot be empty", nil)
 	}
 
 	// Check for path traversal in the original filename before processing
 	// This catches attempts like "../secret.txt" or "path/../file.txt"
 	originalFilename := filename
 	if filename == ".." || strings.HasPrefix(filename, "../") || strings.Contains(filename, "/../") || strings.Contains(filename, "/..") || strings.HasSuffix(filename, "/..") {
-		return "", fmt.Errorf("filename contains path traversal: %s", originalFilename)
+		return "", errors.PathTraversal(originalFilename)
 	}
 
 	// Remove any path separators
@@ -267,7 +268,7 @@ func (tm *TransferManager) validateTargetPath(targetPath, targetRoot string) err
 	// Check if the target path is within the target root
 	// This prevents directory traversal attacks
 	if !strings.HasPrefix(cleanPath, cleanRoot) {
-		return fmt.Errorf("target path %s is outside target root %s", targetPath, targetRoot)
+		return errors.PathTraversal(fmt.Sprintf("%s is outside %s", targetPath, targetRoot))
 	}
 
 	return nil
@@ -341,7 +342,7 @@ func (tm *TransferManager) ResolveCollision(basePath, filename string, policy Co
 			return "", err
 		}
 		if exists {
-			return "", fmt.Errorf("file already exists: %s", filename)
+			return "", errors.AlreadyExists("file", filename)
 		}
 		return filename, nil
 
@@ -350,7 +351,7 @@ func (tm *TransferManager) ResolveCollision(basePath, filename string, policy Co
 		return tm.GenerateUniqueFilename(basePath, filename), nil
 
 	default:
-		return "", fmt.Errorf("unknown collision policy: %s", policy)
+		return "", errors.InvalidInput("unknown collision policy", map[string]interface{}{"policy": policy})
 	}
 }
 

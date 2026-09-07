@@ -6,16 +6,45 @@ package http
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/amamus/ocis-ftp-bridge/pkg/config"
+	"github.com/amamus/ocis-ftp-bridge/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+// generateRandomPassword generates a cryptographically secure random password of the given length
+func generateRandomPassword(length int) string {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*"
+	const charsetLen = len(charset)
+	
+	password := make([]byte, length)
+	for i := 0; i < length; i++ {
+		// Use crypto/rand for secure random number generation
+		randomBytes := make([]byte, 4) // 4 bytes = 32 bits of entropy per character
+		if _, err := io.ReadFull(rand.Reader, randomBytes); err != nil {
+			// Fallback to simpler random if crypto/rand fails (shouldn't happen in practice)
+			password[i] = charset[i%charsetLen]
+			continue
+		}
+		// Use modulo to get a valid index
+		index := int(randomBytes[0]) % charsetLen
+		password[i] = charset[index]
+	}
+	
+	return string(password)
+}
 
 // Server provides HTTP operations endpoints
 type Server interface {
@@ -34,6 +63,7 @@ type OperationsServer struct {
 	actualAddr string
 	mux        *http.ServeMux
 	address    string
+	cfg        *config.Config
 
 	// Health and readiness state
 	healthy int32 // atomic: 1 = healthy, 0 = unhealthy
@@ -47,10 +77,117 @@ type OperationsServer struct {
 	ftpUploadBytesTotal    prometheus.Collector
 	ftpUploadDuration      prometheus.Collector
 	ocisRequestsTotal      prometheus.Collector
+	
+	// Spool metrics
+	SpoolSizeBytes           prometheus.Collector
+	SpoolFileCount           prometheus.Collector
+	SpoolCapacityBytes       prometheus.Collector
+	SpoolUsagePercent        prometheus.Collector
+	SpoolCapacityExceededTotal prometheus.Collector
 }
 
 // NewOperationsServer creates a new operations HTTP server
-func NewOperationsServer(address string) *OperationsServer {
+// BasicAuthMiddleware creates a middleware that requires HTTP Basic Authentication
+func BasicAuthMiddleware(username, password string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Skip authentication for health endpoints if configured to allow it
+			if r.URL.Path == "/healthz" {
+				// Allow health checks without authentication for Kubernetes liveness probes
+				next.ServeHTTP(w, r)
+				return
+			}
+			
+			// Check for Basic Authentication header
+			auth := r.Header.Get("Authorization")
+			if auth == "" {
+				// No authorization header provided
+				w.Header().Set("WWW-Authenticate", `Basic realm="ocis-ftp-bridge"`)
+				http.Error(w, "Unauthorized: Authentication required", http.StatusUnauthorized)
+				return
+			}
+			
+			// Parse Basic Auth header
+			const basicPrefix = "Basic "
+			if !strings.HasPrefix(auth, basicPrefix) {
+				w.Header().Set("WWW-Authenticate", `Basic realm="ocis-ftp-bridge"`)
+				http.Error(w, "Unauthorized: Invalid authorization method", http.StatusUnauthorized)
+				return
+			}
+			
+			// Decode the credentials
+			encoded := strings.TrimPrefix(auth, basicPrefix)
+			decoded, err := base64.StdEncoding.DecodeString(encoded)
+			if err != nil {
+				w.Header().Set("WWW-Authenticate", `Basic realm="ocis-ftp-bridge"`)
+				http.Error(w, "Unauthorized: Invalid credentials encoding", http.StatusUnauthorized)
+				return
+			}
+			
+			// Split into username:password
+			creds := strings.SplitN(string(decoded), ":", 2)
+			if len(creds) != 2 {
+				w.Header().Set("WWW-Authenticate", `Basic realm="ocis-ftp-bridge"`)
+				http.Error(w, "Unauthorized: Invalid credentials format", http.StatusUnauthorized)
+				return
+			}
+			
+			// Validate credentials using constant-time comparison
+			providedUsername := creds[0]
+			providedPassword := creds[1]
+			
+			if subtle.ConstantTimeCompare([]byte(providedUsername), []byte(username)) != 1 ||
+				subtle.ConstantTimeCompare([]byte(providedPassword), []byte(password)) != 1 {
+				w.Header().Set("WWW-Authenticate", `Basic realm="ocis-ftp-bridge"`)
+				http.Error(w, "Unauthorized: Invalid credentials", http.StatusUnauthorized)
+				return
+			}
+			
+			// Authentication successful
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// BearerAuthMiddleware creates a middleware that requires Bearer token authentication
+func BearerAuthMiddleware(token string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Skip authentication for health endpoints
+			if r.URL.Path == "/healthz" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			
+			// Check for Authorization header
+			auth := r.Header.Get("Authorization")
+			if auth == "" {
+				http.Error(w, "Unauthorized: Bearer token required", http.StatusUnauthorized)
+				return
+			}
+			
+			// Parse Bearer token
+			const bearerPrefix = "Bearer "
+			if !strings.HasPrefix(auth, bearerPrefix) {
+				http.Error(w, "Unauthorized: Invalid authorization method", http.StatusUnauthorized)
+				return
+			}
+			
+			providedToken := strings.TrimPrefix(auth, bearerPrefix)
+			
+			// Validate token using constant-time comparison
+			if subtle.ConstantTimeCompare([]byte(providedToken), []byte(token)) != 1 {
+				http.Error(w, "Unauthorized: Invalid token", http.StatusUnauthorized)
+				return
+			}
+			
+			// Authentication successful
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func NewOperationsServer(address string, cfg *config.Config) *OperationsServer {
 	// Create custom registry for our metrics
 	registry := prometheus.NewRegistry()
 
@@ -128,6 +265,52 @@ func NewOperationsServer(address string) *OperationsServer {
 		[]string{"service", "status"},
 	)
 
+	// Spool metrics
+	spoolSizeBytes := prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "ocis_ftp",
+			Subsystem: "spool",
+			Name:      "size_bytes",
+			Help:      "Current size of the spool directory in bytes",
+		},
+	)
+
+	spoolFileCount := prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "ocis_ftp",
+			Subsystem: "spool",
+			Name:      "file_count",
+			Help:      "Current number of files in the spool directory",
+		},
+	)
+
+	spoolCapacityBytes := prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "ocis_ftp",
+			Subsystem: "spool",
+			Name:      "capacity_bytes",
+			Help:      "Maximum capacity of the spool directory in bytes",
+		},
+	)
+
+	spoolUsagePercent := prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "ocis_ftp",
+			Subsystem: "spool",
+			Name:      "usage_percent",
+			Help:      "Current spool usage as percentage of capacity",
+		},
+	)
+
+	spoolCapacityExceededTotal := prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: "ocis_ftp",
+			Subsystem: "spool",
+			Name:      "capacity_exceeded_total",
+			Help:      "Total number of times spool capacity has been exceeded",
+		},
+	)
+
 	// Register all metrics
 	registry.MustRegister(
 		ftpSessionsTotal,
@@ -137,7 +320,37 @@ func NewOperationsServer(address string) *OperationsServer {
 		ftpUploadBytesTotal,
 		ftpUploadDuration,
 		ocisRequestsTotal,
+		spoolSizeBytes,
+		spoolFileCount,
+		spoolCapacityBytes,
+		spoolUsagePercent,
+		spoolCapacityExceededTotal,
 	)
+
+	// Store configuration
+	var authMiddleware func(http.Handler) http.Handler
+	
+	// Configure authentication middleware if enabled
+	if cfg != nil && cfg.HTTP.Auth.Enabled {
+		switch cfg.HTTP.Auth.Method {
+		case "basic":
+			// Generate a random password if none is provided
+			if cfg.HTTP.Auth.Password == "" {
+				// Generate a secure random password
+				cfg.HTTP.Auth.Password = generateRandomPassword(16)
+			}
+			authMiddleware = BasicAuthMiddleware(cfg.HTTP.Auth.Username, cfg.HTTP.Auth.Password)
+		case "bearer":
+			if cfg.HTTP.Auth.BearerToken == "" {
+				cfg.HTTP.Auth.BearerToken = generateRandomPassword(32)
+			}
+			authMiddleware = BearerAuthMiddleware(cfg.HTTP.Auth.BearerToken)
+		default:
+			// No authentication, but this should be caught by config validation
+			// If we reach here, authentication is effectively disabled
+			authMiddleware = nil
+		}
+	}
 
 	// Set up HTTP routes
 	mux := http.NewServeMux()
@@ -146,6 +359,7 @@ func NewOperationsServer(address string) *OperationsServer {
 	s := &OperationsServer{
 		address:               address,
 		mux:                  mux,
+		cfg:                 cfg,
 		healthy:               1,
 		ready:                 1,
 		ftpSessionsTotal:      ftpSessionsTotal,
@@ -155,6 +369,11 @@ func NewOperationsServer(address string) *OperationsServer {
 		ftpUploadBytesTotal:   ftpUploadBytesTotal,
 		ftpUploadDuration:     ftpUploadDuration,
 		ocisRequestsTotal:     ocisRequestsTotal,
+		SpoolSizeBytes:        spoolSizeBytes,
+		SpoolFileCount:        spoolFileCount,
+		SpoolCapacityBytes:    spoolCapacityBytes,
+		SpoolUsagePercent:     spoolUsagePercent,
+		SpoolCapacityExceededTotal: spoolCapacityExceededTotal,
 	}
 
 	// Health endpoint
@@ -184,9 +403,21 @@ func NewOperationsServer(address string) *OperationsServer {
 		EnableOpenMetrics: true,
 	}))
 
+	// Create the final handler with authentication middleware if configured
+	finalHandler := http.Handler(mux)
+	if authMiddleware != nil {
+		finalHandler = authMiddleware(mux)
+		// Log authentication configuration
+		fmt.Printf("HTTP authentication enabled: method=%s username=%s\n", 
+			cfg.HTTP.Auth.Method, cfg.HTTP.Auth.Username)
+		if cfg.HTTP.Auth.Method == "basic" {
+			fmt.Printf("WARNING: HTTP Basic Auth password has been set. Keep it secret!\n")
+		}
+	}
+
 	s.server = &http.Server{
 		Addr:    address,
-		Handler: mux,
+		Handler: finalHandler,
 	}
 
 	return s
@@ -341,4 +572,81 @@ func (s *OperationsServer) IncrementOcisRequestsTotal(service, status string) {
 	if cv, ok := s.ocisRequestsTotal.(*prometheus.CounterVec); ok {
 		cv.WithLabelValues(service, status).Inc()
 	}
+}
+
+// Spool monitoring methods
+
+// SetSpoolSizeBytes sets the current spool size in bytes
+func (s *OperationsServer) SetSpoolSizeBytes(size uint64) {
+	if g, ok := s.SpoolSizeBytes.(prometheus.Gauge); ok {
+		g.Set(float64(size))
+	}
+}
+
+// SetSpoolFileCount sets the current number of files in spool
+func (s *OperationsServer) SetSpoolFileCount(count uint64) {
+	if g, ok := s.SpoolFileCount.(prometheus.Gauge); ok {
+		g.Set(float64(count))
+	}
+}
+
+// SetSpoolCapacityBytes sets the spool capacity in bytes
+func (s *OperationsServer) SetSpoolCapacityBytes(capacity uint64) {
+	if g, ok := s.SpoolCapacityBytes.(prometheus.Gauge); ok {
+		g.Set(float64(capacity))
+	}
+}
+
+// SetSpoolUsagePercent sets the spool usage percentage
+func (s *OperationsServer) SetSpoolUsagePercent(percent float64) {
+	if g, ok := s.SpoolUsagePercent.(prometheus.Gauge); ok {
+		g.Set(percent)
+	}
+}
+
+// IncrementSpoolCapacityExceededTotal increments the spool capacity exceeded counter
+func (s *OperationsServer) IncrementSpoolCapacityExceededTotal() {
+	if c, ok := s.SpoolCapacityExceededTotal.(prometheus.Counter); ok {
+		c.Inc()
+	}
+}
+
+// ErrorResponse represents a structured error response for API endpoints.
+type ErrorResponse struct {
+	Error struct {
+		Code    string                 `json:"code"`
+		Message string                 `json:"message"`
+		Details map[string]interface{} `json:"details,omitempty"`
+	} `json:"error"`
+}
+
+// NewErrorResponse creates a new error response from an error.
+// If the error is an AppError, it extracts the code, message, and details.
+// Otherwise, it uses INTERNAL_ERROR as the code.
+func NewErrorResponse(err error) ErrorResponse {
+	code := errors.GetCode(err)
+	message := errors.GetMessage(err)
+	details := errors.GetDetails(err)
+
+	// If we couldn't extract details, use empty map
+	if details == nil {
+		details = make(map[string]interface{})
+	}
+
+	return ErrorResponse{
+		Error: struct {
+			Code    string                 `json:"code"`
+			Message string                 `json:"message"`
+			Details map[string]interface{} `json:"details,omitempty"`
+		}{
+			Code:    string(code),
+			Message: message,
+			Details: details,
+		},
+	}
+}
+
+// GetHTTPStatus returns the appropriate HTTP status code for an error.
+func GetHTTPStatus(err error) int {
+	return errors.HTTPStatus(err)
 }
