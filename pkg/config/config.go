@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/argon2"
 	"gopkg.in/yaml.v3"
@@ -79,6 +80,8 @@ type ServerConfig struct {
 	Passive       PassiveConfig `yaml:"passive" json:"passive"`
 	TLS           TLSConfig     `yaml:"tls" json:"tls"`
 	MaxConnections int         `yaml:"max_connections,omitempty" json:"max_connections,omitempty"`
+	// Rate limiting configuration
+	RateLimiting RateLimitConfig `yaml:"rate_limiting,omitempty" json:"rate_limiting,omitempty"`
 }
 
 type PassiveConfig struct {
@@ -91,6 +94,23 @@ type TLSConfig struct {
 	Enabled bool   `yaml:"enabled" json:"enabled"`
 	Cert    string `yaml:"cert,omitempty" json:"cert,omitempty"`
 	Key     string `yaml:"key,omitempty" json:"key,omitempty"`
+}
+
+// RateLimitConfig defines rate limiting settings for FTP server
+type RateLimitConfig struct {
+	// Per-IP connection rate limiting
+	MaxConnectionsPerIP int `yaml:"max_connections_per_ip,omitempty" json:"max_connections_per_ip,omitempty"`
+	
+	// Global connection limiting (overrides per-IP if lower)
+	MaxGlobalConnections int `yaml:"max_global_connections,omitempty" json:"max_global_connections,omitempty"`
+	
+	// Authentication attempt rate limiting
+	MaxAuthAttemptsPerIP int `yaml:"max_auth_attempts_per_ip,omitempty" json:"max_auth_attempts_per_ip,omitempty"`
+	AuthAttemptWindow time.Duration `yaml:"auth_attempt_window,omitempty" json:"auth_attempt_window,omitempty"`
+	AuthLockoutDuration time.Duration `yaml:"auth_lockout_duration,omitempty" json:"auth_lockout_duration,omitempty"`
+	
+	// IP lockout tracking
+	TrackFailedAttempts bool `yaml:"track_failed_attempts,omitempty" json:"track_failed_attempts,omitempty"`
 }
 
 type OCISConfig struct {
@@ -160,10 +180,20 @@ func New() *Config {
 			Listen:          ":2121",
 			Passive:         PassiveConfig{MinPort: 40000, MaxPort: 50000},
 			MaxConnections:  100,
-			// TLS is disabled by default for development convenience
-			// Production deployments should enable TLS explicitly
+			// TLS is enabled by default for security
+			// Plain FTP (unencrypted) is insecure and should be avoided
 			TLS: TLSConfig{
-				Enabled: false,
+				Enabled: true,  // TLS is enabled by default for security
+				Cert:    "", // Will be validated at startup if enabled
+				Key:     "", // Will be validated at startup if enabled
+			},
+			RateLimiting: RateLimitConfig{
+				MaxConnectionsPerIP:   10,    // Max 10 connections per IP
+				MaxGlobalConnections:  100,   // Max 100 total connections
+				MaxAuthAttemptsPerIP:  5,     // Max 5 auth attempts per IP per window
+				AuthAttemptWindow:     time.Minute, // 1 minute window for auth attempts
+				AuthLockoutDuration:   5 * time.Minute, // 5 minute lockout after max attempts
+				TrackFailedAttempts:   true,   // Track failed auth attempts for rate limiting
 			},
 		},
 		OCIS: OCISConfig{

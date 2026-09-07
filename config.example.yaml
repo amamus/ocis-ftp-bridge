@@ -5,9 +5,17 @@ server:
     max_port: 30020
     public_ip: ""
   tls:
-    enabled: false
-    cert: /etc/ocis-ftp/tls.crt
-    key: /etc/ocis-ftp/tls.key
+    enabled: true  # TLS is enabled by default for security
+    cert: /etc/ocis-ftp/tls.crt  # Path to TLS certificate
+    key: /etc/ocis-ftp/tls.key   # Path to TLS private key
+  # Rate limiting configuration
+  rate_limiting:
+    max_connections_per_ip: 10    # Maximum connections per IP address
+    max_global_connections: 100   # Maximum total connections to the server
+    max_auth_attempts_per_ip: 5   # Maximum authentication attempts per IP
+    auth_attempt_window: 1m       # Time window for auth attempt tracking
+    auth_lockout_duration: 5m    # Duration to lock out IP after max failed attempts
+    track_failed_attempts: true  # Enable tracking of failed auth attempts for rate limiting
 
 ocis:
   url: https://cloud.example.com
