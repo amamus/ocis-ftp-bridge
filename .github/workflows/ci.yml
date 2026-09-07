@@ -72,7 +72,7 @@ jobs:
             -X main.BuildDate=${BUILD_DATE}" \
           -o ${{ env.BINARY_NAME }} \
           ./cmd/ocis-ftp-bridge
-        ./ocis-ftp-bridge -version
+        ./${{ env.BINARY_NAME }} -version
 
     - name: Build Docker image
       run: |
@@ -438,7 +438,7 @@ jobs:
   release-prep:
     name: Release Preparation
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     if: github.ref == 'refs/heads/main'
     needs: [test-and-build, e2e-tests]
     
@@ -473,9 +473,25 @@ jobs:
           tar -czf ${output}.tar.gz ${output}
         done
 
+    - name: Generate SBOM for release
+      run: |
+        echo "Installing Syft for SBOM generation..."
+        curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+        
+        echo "Generating SPDX SBOM..."
+        syft dir:. -o spdx-json=sbom.spdx.json --exclude "**/vendor/**" --exclude "**/test/**" --exclude "./.git/**"
+        
+        echo "Generating CycloneDX SBOM..."
+        syft dir:. -o cyclonedx-json=sbom.cyclonedx.json --exclude "**/vendor/**" --exclude "**/test/**" --exclude "./.git/**"
+        
+        echo "SBOM generation completed"
+
     - name: Upload release artifacts
       uses: actions/upload-artifact@v4
       with:
         name: release-binaries
-        path: ocis-ftp-bridge-*.tar.gz
+        path: |
+          ocis-ftp-bridge-*.tar.gz
+          sbom.spdx.json
+          sbom.cyclonedx.json
         retention-days: 7

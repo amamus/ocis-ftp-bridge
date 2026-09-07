@@ -1,3 +1,9 @@
 /ocis-ftp-bridge
 /1p-*
 /1x
+
+# SBOM generation tools (local development)
+/.bin/
+
+# SBOM vulnerability scan results (generated, not committed)
+/vulnerabilities.json
