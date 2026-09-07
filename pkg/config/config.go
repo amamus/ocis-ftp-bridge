@@ -2,7 +2,12 @@
 package config
 
 import (
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/rsa"
 	"crypto/subtle"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -14,6 +19,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/argon2"
 	"gopkg.in/yaml.v3"
@@ -144,10 +150,12 @@ func New() *Config {
 			Listen:          ":2121",
 			Passive:         PassiveConfig{MinPort: 40000, MaxPort: 50000},
 			MaxConnections:  100,
-			// TLS is disabled by default for development convenience
-			// Production deployments should enable TLS explicitly
+			// TLS is enabled by default for security
+			// Plain FTP (unencrypted) is insecure and should be avoided
 			TLS: TLSConfig{
-				Enabled: false,
+				Enabled: true,
+				Cert:    "", // Will be validated at startup if enabled
+				Key:     "", // Will be validated at startup if enabled
 			},
 		},
 		OCIS: OCISConfig{
@@ -303,6 +311,73 @@ func (c *Config) validateOCIS() error {
 			return fmt.Errorf("%s %q must be an absolute http(s) URL", name, raw)
 		}
 	}
+	return nil
+}
+
+// ValidateTLSConfig validates TLS configuration at startup
+// This ensures that TLS certificates are valid before the server starts
+func (c *Config) ValidateTLSConfig() error {
+	if !c.Server.TLS.Enabled {
+		// TLS is not enabled, nothing to validate
+		return nil
+	}
+
+	// Check if certificate and key files are specified
+	if strings.TrimSpace(c.Server.TLS.Cert) == "" {
+		return fmt.Errorf("server.tls.cert is required when TLS is enabled")
+	}
+	if strings.TrimSpace(c.Server.TLS.Key) == "" {
+		return fmt.Errorf("server.tls.key is required when TLS is enabled")
+	}
+
+	// Check if certificate file exists and is readable
+	if _, err := os.Stat(c.Server.TLS.Cert); os.IsNotExist(err) {
+		return fmt.Errorf("TLS certificate file not found: %s", c.Server.TLS.Cert)
+	}
+	if _, err := os.Stat(c.Server.TLS.Key); os.IsNotExist(err) {
+		return fmt.Errorf("TLS key file not found: %s", c.Server.TLS.Key)
+	}
+
+	// Load and validate the certificate
+	cert, err := tls.LoadX509KeyPair(c.Server.TLS.Cert, c.Server.TLS.Key)
+	if err != nil {
+		return fmt.Errorf("failed to load TLS certificate/key pair: %w", err)
+	}
+
+	// Parse the certificate to check for issues
+	x509Cert, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return fmt.Errorf("failed to parse TLS certificate: %w", err)
+	}
+
+	// Validate certificate expiration
+	now := time.Now()
+	if now.After(x509Cert.NotAfter) {
+		return fmt.Errorf("TLS certificate expired on %s", x509Cert.NotAfter.Format(time.RFC3339))
+	}
+	if now.Before(x509Cert.NotBefore) {
+		return fmt.Errorf("TLS certificate not yet valid (valid from %s)", x509Cert.NotBefore.Format(time.RFC3339))
+	}
+
+	// Validate certificate key strength
+	switch pubKey := x509Cert.PublicKey.(type) {
+	case *rsa.PublicKey:
+		if pubKey.Size() < 2048 {
+			return fmt.Errorf("TLS certificate RSA key too weak: %d bits (minimum 2048)", pubKey.Size())
+		}
+	case *ecdsa.PublicKey:
+		// Check ECDSA curve strength
+		// P-256, P-384, and P-521 are acceptable
+		curveName := pubKey.Curve.Params().Name
+		if curveName != "P-256" && curveName != "P-384" && curveName != "P-521" {
+			return fmt.Errorf("TLS certificate uses unsupported ECDSA curve: %s", curveName)
+		}
+	case ed25519.PublicKey:
+		// Ed25519 is acceptable
+	default:
+		return fmt.Errorf("TLS certificate uses unsupported public key type: %T", pubKey)
+	}
+
 	return nil
 }
 

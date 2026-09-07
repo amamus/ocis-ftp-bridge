@@ -147,3 +147,73 @@ func TestPasswordVerificationAndRedaction(t *testing.T) {
 		t.Fatalf("secret leaked from loggable representation: %s", rendered)
 	}
 }
+
+func TestTLSValidation(t *testing.T) {
+	// Test TLS disabled - no validation needed
+	t.Run("tls disabled", func(t *testing.T) {
+		cfg := New()
+		cfg.Server.TLS.Enabled = false
+		if err := cfg.ValidateTLSConfig(); err != nil {
+			t.Fatalf("expected no error when TLS disabled, got: %v", err)
+		}
+	})
+
+	// Test TLS enabled but no certificate path
+	t.Run("tls enabled no cert", func(t *testing.T) {
+		cfg := New()
+		cfg.Server.TLS.Enabled = true
+		cfg.Server.TLS.Cert = ""
+		cfg.Server.TLS.Key = ""
+		if err := cfg.ValidateTLSConfig(); err == nil {
+			t.Fatal("expected error when cert path is empty")
+		}
+	})
+
+	// Test TLS enabled but no key path
+	t.Run("tls enabled no key", func(t *testing.T) {
+		cfg := New()
+		cfg.Server.TLS.Enabled = true
+		cfg.Server.TLS.Cert = "/path/to/cert.pem"
+		cfg.Server.TLS.Key = ""
+		if err := cfg.ValidateTLSConfig(); err == nil {
+			t.Fatal("expected error when key path is empty")
+		}
+	})
+
+	// Test non-existent certificate file
+	t.Run("nonexistent cert file", func(t *testing.T) {
+		cfg := New()
+		cfg.Server.TLS.Enabled = true
+		cfg.Server.TLS.Cert = "/nonexistent/path/cert.pem"
+		cfg.Server.TLS.Key = "/nonexistent/path/key.pem"
+		if err := cfg.ValidateTLSConfig(); err == nil {
+			t.Fatal("expected error for nonexistent cert file")
+		}
+	})
+
+	// Test non-existent key file
+	t.Run("nonexistent key file", func(t *testing.T) {
+		cfg := New()
+		cfg.Server.TLS.Enabled = true
+		// Create a temporary cert file
+		tempDir := t.TempDir()
+		certPath := filepath.Join(tempDir, "cert.pem")
+		if err := os.WriteFile(certPath, []byte("dummy cert"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		cfg.Server.TLS.Cert = certPath
+		cfg.Server.TLS.Key = "/nonexistent/key.pem"
+		if err := cfg.ValidateTLSConfig(); err == nil {
+			t.Fatal("expected error for nonexistent key file")
+		}
+	})
+
+	// Test valid TLS configuration (default enabled)
+	t.Run("default tls enabled", func(t *testing.T) {
+		cfg := New()
+		// TLS should be enabled by default
+		if !cfg.Server.TLS.Enabled {
+			t.Fatal("TLS should be enabled by default")
+		}
+	})
+}
