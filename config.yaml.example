@@ -83,13 +83,19 @@ http:
 # FTP Account Configuration
 # ============================================================================
 # Each account represents an FTP user that can upload files to oCIS
+# SECURITY NOTE: Credentials are sensitive. Use environment variables for tokens
+# and generate unique password hashes for each account.
 accounts:
   # Example printer account
   - username: "hp-printer"
     
-    # Argon2id password hash (use: htpasswd -B -C 12 -i -d password | tr -d '\n')
-    # Or use a tool like: go run cmd/hash-password/main.go
-    password_hash: "$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJC1OeqncgJ2almHUfLnhtRTVrjD8zGQ"
+    # Argon2id password hash (PHC format).
+    # NEVER use plaintext passwords.
+    # Generate hashes using:
+    #   htpasswd -B -C 12 -i -d password | tr -d '\n'
+    # Or: go run cmd/hash-password/main.go
+    # Replace this with your own generated hash!
+    password_hash: "$argon2id$v=19$m=65536,t=3,p=4$jK4n6v8Bw5Fh9Lm3NqPj8H$DWQ3EeT6RfYhMjDfGvXpCnMqLkJiGfDs"
     
     # oCIS credentials
     ocis:
@@ -97,7 +103,9 @@ accounts:
       username: "ftp-service-account"
       
       # Environment variable containing the oCIS App Token
-      # This is more secure than storing the token directly in the config
+      # This is more secure than storing the token directly in the config.
+      # Set the environment variable before starting the service:
+      #   export OCIS_APP_TOKEN="your-ocis-app-token-here"
       app_token_env: "OCIS_APP_TOKEN"
     
     # Target configuration
@@ -119,7 +127,8 @@ accounts:
 
   # Example scanner account
   - username: "scanner1"
-    password_hash: "$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJC1OeqncgJ2almHUfLnhtRTVrjD8zGQ"
+    # Each account should have a unique password hash
+    password_hash: "$argon2id$v=19$m=65536,t=3,p=4$kL5n7v9Bw6Fh0Lm4NqPj9H$EWQ4EeT7RfYhNkDfGvXpDnMqLkJkGfDt"
     
     ocis:
       username: "scanner-service-account"
