@@ -69,3 +69,16 @@ Run the local checks with:
 go test ./...
 go vet ./...
 ```
+
+## Community
+
+This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md).
+By participating in this community, you agree to abide by its terms.
+
+Please report any unacceptable behavior to the project maintainers via GitHub issues or discussions.
+
+## Contributing
+
+We use the [Developer Certificate of Origin (DCO)](DCO.txt) as our contributor license agreement.
+Please ensure all your commits are signed-off with `Signed-off-by: Your Name <your.email@example.com>`.
+You can automatically sign-off your commits using `git commit -s`.
