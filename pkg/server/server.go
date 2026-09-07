@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/amamus/ocis-ftp-bridge/pkg/config"
 	"github.com/amamus/ocis-ftp-bridge/pkg/ftp"
@@ -64,7 +65,15 @@ func New(cfg *config.Config, obs observability.Client) (Server, error) {
 	ftpServer := ftp.NewServer(ftpDriver)
 
 	// Initialize HTTP operations server
-	httpServer := http.NewOperationsServer(cfg.HTTP.Address)
+	healthCheckConfig := http.HealthCheckConfig{
+		OCISURL:        cfg.OCIS.URL,
+		OCISUsername:   "", // Will be set per account
+		OCISPassword:   "", // Will be set per account
+		WebDAVURL:      cfg.OCIS.WebDAVURL,
+		SpoolDirectory: cfg.Spool.Directory,
+		CheckTimeout:   5 * time.Second, // Default timeout
+	}
+	httpServer := http.NewOperationsServer(cfg.HTTP.Address, healthCheckConfig)
 
 	return &service{
 		cfg:            cfg,
