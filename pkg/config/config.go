@@ -212,8 +212,13 @@ func (c *Config) validateWithEnv(lookupEnv func(string) (string, bool)) error {
 	if c == nil {
 		return errors.New("configuration is nil")
 	}
+	
+	// Validate server configuration
 	if strings.TrimSpace(c.Server.Listen) == "" {
 		return errors.New("server.listen is required")
+	}
+	if err := validateServerListenAddress(c.Server.Listen); err != nil {
+		return fmt.Errorf("server.listen: %w", err)
 	}
 	if err := validatePassive(c.Server.Passive); err != nil {
 		return err
@@ -221,11 +226,21 @@ func (c *Config) validateWithEnv(lookupEnv func(string) (string, bool)) error {
 	if c.Server.TLS.Enabled && (strings.TrimSpace(c.Server.TLS.Cert) == "" || strings.TrimSpace(c.Server.TLS.Key) == "") {
 		return errors.New("server.tls.cert and server.tls.key are required when TLS is enabled")
 	}
+	// TLS file existence is checked at runtime, not during config validation
 	if err := c.validateOCIS(); err != nil {
 		return err
 	}
+	
+	// Validate spool configuration
 	if !filepath.IsAbs(c.Spool.Directory) {
 		return fmt.Errorf("spool.directory must be an absolute path: %q", c.Spool.Directory)
+	}
+	// Check if spool directory exists (warning only, not error)
+	if _, err := os.Stat(c.Spool.Directory); err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("cannot access spool.directory %q: %w", c.Spool.Directory, err)
+		}
+		// Directory doesn't exist - this is okay, it will be created when needed
 	}
 	if c.Spool.MaxTotalSize == 0 && c.Spool.MaxSize > 0 {
 		c.Spool.MaxTotalSize = ByteSize(c.Spool.MaxSize)
@@ -234,6 +249,13 @@ func (c *Config) validateWithEnv(lookupEnv func(string) (string, bool)) error {
 		return errors.New("spool.max_total_size must be greater than zero")
 	}
 	c.Spool.MaxSize = uint64(c.Spool.MaxTotalSize)
+	
+	// Validate HTTP configuration if provided
+	if c.HTTP.Address != "" {
+		if err := validateServerListenAddress(c.HTTP.Address); err != nil {
+			return fmt.Errorf("http.address: %w", err)
+		}
+	}
 
 	seen := make(map[string]struct{}, len(c.Accounts))
 	for i := range c.Accounts {
@@ -315,6 +337,86 @@ func validatePassive(p PassiveConfig) error {
 	}
 	return nil
 }
+
+// validateServerListenAddress validates the server listen address format
+func validateServerListenAddress(addr string) error {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return errors.New("address is required")
+	}
+	
+	// Support both hostname:port and :port formats
+	if !strings.Contains(addr, ":") {
+		return fmt.Errorf("invalid address format %q: expected host:port or :port", addr)
+	}
+	
+	// Split into host and port parts
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		// If it starts with :, it might be just a port
+		if strings.HasPrefix(addr, ":") {
+			port = strings.TrimPrefix(addr, ":")
+			host = ""
+		} else {
+			return fmt.Errorf("invalid address format %q: %w", addr, err)
+		}
+	}
+	
+	// Validate port
+	if port == "" {
+		return errors.New("port is required")
+	}
+	portNum, err := strconv.Atoi(port)
+	if err != nil {
+		return fmt.Errorf("invalid port %q: %w", port, err)
+	}
+	if portNum < 1 || portNum > 65535 {
+		return fmt.Errorf("port %d must be between 1 and 65535", portNum)
+	}
+	
+	// Validate host if provided
+	if host != "" && host != "0.0.0.0" && host != "::" && host != "*" {
+		if ip := net.ParseIP(host); ip == nil {
+			// Check if it's a valid hostname
+			if !isValidHostname(host) {
+				return fmt.Errorf("invalid hostname %q", host)
+			}
+		}
+	}
+	
+	return nil
+}
+
+// isValidHostname checks if a string is a valid hostname
+func isValidHostname(hostname string) bool {
+	if len(hostname) > 253 {
+		return false
+	}
+	
+	// Check each label
+	labels := strings.Split(hostname, ".")
+	if len(labels) == 0 {
+		return false
+	}
+	
+	for _, label := range labels {
+		if len(label) == 0 || len(label) > 63 {
+			return false
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, r := range label {
+			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-') {
+				return false
+			}
+		}
+	}
+	
+	return true
+}
+
+
 
 func normalizeTargetRoot(root string) (string, error) {
 	if strings.TrimSpace(root) == "" || !strings.HasPrefix(root, "/") {
