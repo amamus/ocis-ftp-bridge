@@ -4,14 +4,18 @@ Thank you for your interest in contributing to the ocis-ftp-bridge project! This
 
 ## Code of Conduct
 
-This project follows a simple code of conduct: **Be respectful and professional**. We expect all contributors to:
+This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md).
+By participating in this community, you agree to abide by its terms.
+
+In summary, we expect all contributors to:
 
 - Be welcoming and inclusive
 - Respect different viewpoints and experiences
 - Gracefully accept constructive criticism
 - Focus on what is best for the project and its users
 
-Violations of the code of conduct may result in removal from the project.
+Violations of the code of conduct may be reported via GitHub issues or discussions
+and will be investigated promptly and fairly.
 
 ## Getting Started
 
