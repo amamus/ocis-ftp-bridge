@@ -10,8 +10,6 @@ build/
 dist/
 
 # Dependency directories
-go.mod
-go.sum
 vendor/
 
 # IDE and editor files
