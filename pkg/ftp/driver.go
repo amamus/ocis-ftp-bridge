@@ -26,6 +26,193 @@ import (
 	"github.com/amamus/ocis-ftp-bridge/pkg/webdav"
 )
 
+// ConnectionTracker tracks connections per IP for rate limiting
+type ConnectionTracker struct {
+	mu            sync.Mutex
+	ipConnections map[string]int64 // IP -> connection count
+	maxPerIP     int
+	maxGlobal    int64
+	globalCount  int64
+}
+
+// AuthAttemptTracker tracks authentication attempts per IP for rate limiting
+type AuthAttemptTracker struct {
+	mu               sync.Mutex
+	ipAttempts      map[string]*authAttemptInfo // IP -> attempt tracking
+	maxAttempts     int
+	window          time.Duration
+	lockoutDuration time.Duration
+}
+
+// authAttemptInfo stores tracking information for rate limiting authentication attempts
+type authAttemptInfo struct {
+	count       int
+	firstFail   time.Time
+	lastAttempt time.Time
+	lockedOut   bool
+	lockoutEnd  time.Time
+}
+
+// newConnectionTracker creates a new connection tracker
+func newConnectionTracker(maxPerIP, maxGlobal int) *ConnectionTracker {
+	return &ConnectionTracker{
+		ipConnections: make(map[string]int64),
+		maxPerIP:     maxPerIP,
+		maxGlobal:    int64(maxGlobal),
+	}
+}
+
+// newAuthAttemptTracker creates a new auth attempt tracker
+func newAuthAttemptTracker(maxAttempts int, window, lockoutDuration time.Duration) *AuthAttemptTracker {
+	return &AuthAttemptTracker{
+		ipAttempts:      make(map[string]*authAttemptInfo),
+		maxAttempts:     maxAttempts,
+		window:          window,
+		lockoutDuration: lockoutDuration,
+	}
+}
+
+// AllowConnection checks if a connection from the given IP is allowed
+func (ct *ConnectionTracker) AllowConnection(ip string) bool {
+	if ct == nil {
+		return true // No rate limiting configured
+	}
+	
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+	
+	// Check global limit
+	if ct.globalCount >= ct.maxGlobal {
+		return false
+	}
+	
+	// Check per-IP limit
+	count, exists := ct.ipConnections[ip]
+	if exists && count >= int64(ct.maxPerIP) {
+		return false
+	}
+	
+	// Allow the connection
+	ct.ipConnections[ip] = count + 1
+	ct.globalCount++
+	return true
+}
+
+// ReleaseConnection decrements counters when a connection is closed
+func (ct *ConnectionTracker) ReleaseConnection(ip string) {
+	if ct == nil {
+		return
+	}
+	
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+	
+	if count, exists := ct.ipConnections[ip]; exists && count > 0 {
+		ct.ipConnections[ip] = count - 1
+	}
+	if ct.globalCount > 0 {
+		ct.globalCount--
+	}
+}
+
+// IsIPLockedOut checks if the given IP is currently locked out due to too many failed auth attempts
+func (at *AuthAttemptTracker) IsIPLockedOut(ip string) bool {
+	if at == nil {
+		return false // No rate limiting configured
+	}
+	
+	at.mu.Lock()
+	defer at.mu.Unlock()
+	
+	if info, exists := at.ipAttempts[ip]; exists {
+		if info.lockedOut {
+			// Check if lockout has expired
+			if time.Now().Before(info.lockoutEnd) {
+				return true
+			}
+			// Lockout expired, reset the tracking
+			delete(at.ipAttempts, ip)
+			return false
+		}
+		
+		// Also check if the attempt window has expired (even without lockout)
+		if !info.firstFail.IsZero() && time.Since(info.firstFail) > at.window {
+			// Window expired, clean up
+			delete(at.ipAttempts, ip)
+			return false
+		}
+		
+		// If not locked out and window hasn't expired, check if we're still in lockout state
+		// This handles the case where the window expired but we haven't cleaned up yet
+		if !info.firstFail.IsZero() && info.count >= at.maxAttempts {
+			// This should have triggered lockout, but check if window expired
+			if time.Since(info.firstFail) > at.window {
+				delete(at.ipAttempts, ip)
+				return false
+			}
+			// If we're within the window and have max attempts, we should be locked out
+			// This shouldn't happen normally, but handle it
+			info.lockedOut = true
+			info.lockoutEnd = time.Now().Add(at.lockoutDuration)
+			return true
+		}
+	}
+	return false
+}
+
+// RecordAuthAttempt records an authentication attempt and checks rate limits
+func (at *AuthAttemptTracker) RecordAuthAttempt(ip string, success bool) bool {
+	if at == nil {
+		return true // No rate limiting configured
+	}
+	
+	at.mu.Lock()
+	defer at.mu.Unlock()
+	
+	info, exists := at.ipAttempts[ip]
+	if !exists {
+		info = &authAttemptInfo{
+			count:       0,
+			lastAttempt: time.Now(),
+		}
+		at.ipAttempts[ip] = info
+	}
+	
+	// If this is a successful attempt, reset the failure tracking
+	if success {
+		info.count = 0 // Reset counter on success
+		info.firstFail = time.Time{} // Reset failure tracking
+		info.lastAttempt = time.Now()
+		return true
+	}
+	
+	// For failed attempts
+	info.count++
+	info.lastAttempt = time.Now()
+	
+	// Check if we need to start lockout tracking
+	if info.firstFail.IsZero() {
+		info.firstFail = time.Now()
+	}
+	
+	// Check if we've reached or exceeded the limit within the window
+	// Lock out when count >= maxAttempts (i.e., allow maxAttempts-1 failed attempts)
+	if info.count >= at.maxAttempts {
+		// Check if we're still within the window from first failure
+		if time.Since(info.firstFail) <= at.window {
+			// Lock out this IP
+			info.lockedOut = true
+			info.lockoutEnd = time.Now().Add(at.lockoutDuration)
+			return false
+		}
+		// Window has expired, reset tracking
+		info.count = 1
+		info.firstFail = time.Now()
+	}
+	
+	return true
+}
+
 // BridgeDriver implements MainDriver interface
 // to handle FTP connections and provide authentication for oCIS bridge.
 type BridgeDriver struct {
@@ -48,6 +235,10 @@ type BridgeDriver struct {
 
 	// Account management
 	accounts map[string]*config.AccountConfig
+	
+	// Rate limiting
+	connectionTracker *ConnectionTracker
+	authAttemptTracker *AuthAttemptTracker
 
 	// Sync primitives
 	mu sync.RWMutex
@@ -58,6 +249,8 @@ type BridgeDriver struct {
 }
 
 // NewBridgeDriver creates a new bridge FTP server driver.
+
+
 func NewBridgeDriver(
 	cfg *config.Config,
 	obs observability.Client,
@@ -85,6 +278,22 @@ func NewBridgeDriver(
 		})
 	}
 
+	// Initialize rate limiting trackers
+	var connTracker *ConnectionTracker
+	var authTracker *AuthAttemptTracker
+	
+	if cfg.Server.RateLimiting.TrackFailedAttempts {
+		connTracker = newConnectionTracker(
+			cfg.Server.RateLimiting.MaxConnectionsPerIP,
+			cfg.Server.RateLimiting.MaxGlobalConnections,
+		)
+		authTracker = newAuthAttemptTracker(
+			cfg.Server.RateLimiting.MaxAuthAttemptsPerIP,
+			cfg.Server.RateLimiting.AuthAttemptWindow,
+			cfg.Server.RateLimiting.AuthLockoutDuration,
+		)
+	}
+
 	return &BridgeDriver{
 		cfg:           cfg,
 		obs:          obs,
@@ -93,6 +302,8 @@ func NewBridgeDriver(
 		transferManager: transferMgr,
 		accounts:      accounts,
 		maxConnections: cfg.Server.MaxConnections,
+		connectionTracker: connTracker,
+		authAttemptTracker: authTracker,
 		shutdownChan:  make(chan struct{}),
 	}
 }
@@ -104,6 +315,9 @@ func NewBridgeDriver(
 // AuthUser is called when USER command is received. Returns a ClientDriver
 // if authentication succeeds.
 func (d *BridgeDriver) AuthUser(cc ftpserver.ClientContext, user, password string) (ftpserver.ClientDriver, error) {
+	// Get client IP for rate limiting
+	clientIP := cc.RemoteAddr().String()
+	
 	// Check shutdown
 	select {
 	case <-d.shutdownChan:
@@ -111,11 +325,21 @@ func (d *BridgeDriver) AuthUser(cc ftpserver.ClientContext, user, password strin
 	default:
 	}
 
-	// Check connection limit
+	// Rate limiting: Check if IP is locked out due to too many failed attempts
+	if d.authAttemptTracker != nil && d.authAttemptTracker.IsIPLockedOut(clientIP) {
+		return nil, fmt.Errorf("too many failed authentication attempts from %s. Try again later", clientIP)
+	}
+
+	// Rate limiting: Check connection limits per IP
+	if d.connectionTracker != nil && !d.connectionTracker.AllowConnection(clientIP) {
+		return nil, fmt.Errorf("connection limit reached for this IP")
+	}
+
+	// Check global connection limit
 	if d.maxConnections > 0 {
 		current := atomic.LoadInt64(&d.activeConnections)
 		if current >= int64(d.maxConnections) {
-			return nil, fmt.Errorf("connection limit reached")
+			return nil, fmt.Errorf("server connection limit reached")
 		}
 	}
 
@@ -123,12 +347,20 @@ func (d *BridgeDriver) AuthUser(cc ftpserver.ClientContext, user, password strin
 	account, err := d.authenticateUser(user, password)
 	if err != nil {
 		d.obs.Log("info", fmt.Sprintf("FTP authentication failed for user %s: %v", user, err))
+		// Record failed authentication attempt for rate limiting
+		if d.authAttemptTracker != nil {
+			d.authAttemptTracker.RecordAuthAttempt(clientIP, false)
+		}
 		return nil, ErrInvalidCredentials
 	}
 
 	// Check if account has required oCIS configuration
 	if account.OCIS.Username == "" || account.AppToken == "" {
 		d.obs.Log("warn", fmt.Sprintf("FTP account missing oCIS configuration for user %s", user))
+		// Record failed authentication attempt for rate limiting
+		if d.authAttemptTracker != nil {
+			d.authAttemptTracker.RecordAuthAttempt(clientIP, false)
+		}
 		return nil, ErrInvalidCredentials
 	}
 
@@ -164,6 +396,11 @@ func (d *BridgeDriver) AuthUser(cc ftpserver.ClientContext, user, password strin
 	// Create a real context for this session
 	clientDriver.context, clientDriver.cancel = context.WithCancel(context.Background())
 
+	// Record successful authentication attempt for rate limiting
+	if d.authAttemptTracker != nil {
+		d.authAttemptTracker.RecordAuthAttempt(clientIP, true)
+	}
+
 	// Increment connection counter
 	atomic.AddInt64(&d.activeConnections, 1)
 
@@ -183,6 +420,11 @@ func (d *BridgeDriver) OnLogin(client ftpserver.ClientContext) error {
 func (d *BridgeDriver) OnLogout(client ftpserver.ClientContext) error {
 	// Decrement connection counter
 	atomic.AddInt64(&d.activeConnections, -1)
+	
+	// Release rate limiting connection tracking
+	if d.connectionTracker != nil {
+		d.connectionTracker.ReleaseConnection(client.RemoteAddr().String())
+	}
 
 	d.obs.Log("info", fmt.Sprintf("FTP client logged out (ID: %d, addr: %s)", client.ID(), client.RemoteAddr().String()))
 	return nil

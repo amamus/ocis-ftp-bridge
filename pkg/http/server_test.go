@@ -2,13 +2,16 @@ package http
 
 import (
 	"context"
+	"encoding/base64"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
 
 func TestOperationsServer_Creation(t *testing.T) {
 	t.Run("create server with default address", func(t *testing.T) {
-		server := NewOperationsServer(":9200")
+		server := NewOperationsServer(":9200", nil)
 		if server == nil {
 			t.Fatal("Expected non-nil server")
 		}
@@ -19,7 +22,7 @@ func TestOperationsServer_Creation(t *testing.T) {
 	})
 
 	t.Run("create server with random port", func(t *testing.T) {
-		server := NewOperationsServer(":0")
+		server := NewOperationsServer(":0", nil)
 		if server == nil {
 			t.Fatal("Expected non-nil server")
 		}
@@ -28,7 +31,7 @@ func TestOperationsServer_Creation(t *testing.T) {
 
 func TestOperationsServer_StartStop(t *testing.T) {
 	t.Run("start and stop without error", func(t *testing.T) {
-		server := NewOperationsServer(":0")
+		server := NewOperationsServer(":0", nil)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -62,7 +65,7 @@ func TestOperationsServer_StartStop(t *testing.T) {
 	})
 
 	t.Run("double start returns error", func(t *testing.T) {
-		server := NewOperationsServer(":0")
+		server := NewOperationsServer(":0", nil)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -83,7 +86,7 @@ func TestOperationsServer_StartStop(t *testing.T) {
 	})
 
 	t.Run("double stop is safe", func(t *testing.T) {
-		server := NewOperationsServer(":0")
+		server := NewOperationsServer(":0", nil)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -110,7 +113,7 @@ func TestOperationsServer_StartStop(t *testing.T) {
 
 func TestOperationsServer_HealthState(t *testing.T) {
 	t.Run("health state management", func(t *testing.T) {
-		server := NewOperationsServer(":0")
+		server := NewOperationsServer(":0", nil)
 
 		// Initially healthy
 		if !server.IsHealthy() {
@@ -131,7 +134,7 @@ func TestOperationsServer_HealthState(t *testing.T) {
 	})
 
 	t.Run("ready state management", func(t *testing.T) {
-		server := NewOperationsServer(":0")
+		server := NewOperationsServer(":0", nil)
 
 		// Initially ready
 		if !server.IsReady() {
@@ -154,7 +157,7 @@ func TestOperationsServer_HealthState(t *testing.T) {
 
 func TestOperationsServer_Metrics(t *testing.T) {
 	t.Run("metrics methods do not panic", func(t *testing.T) {
-		server := NewOperationsServer(":0")
+		server := NewOperationsServer(":0", nil)
 
 		// These should not panic
 		server.IncrementFTPSessionTotal("success")
@@ -174,5 +177,133 @@ func TestOperationsServer_Metrics(t *testing.T) {
 		
 		server.IncrementOcisRequestsTotal("graph", "success")
 		server.IncrementOcisRequestsTotal("webdav", "failure")
+	})
+}
+
+func TestBasicAuthMiddleware(t *testing.T) {
+	t.Run("valid credentials", func(t *testing.T) {
+		middleware := BasicAuthMiddleware("testuser", "testpass")
+		handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		
+		req := httptest.NewRequest("GET", "/metrics", nil)
+		req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("testuser:testpass")))
+		
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		
+		if rr.Code != http.StatusOK {
+			t.Errorf("Expected status %d, got %d", http.StatusOK, rr.Code)
+		}
+	})
+	
+	t.Run("invalid credentials", func(t *testing.T) {
+		middleware := BasicAuthMiddleware("testuser", "testpass")
+		handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		
+		req := httptest.NewRequest("GET", "/metrics", nil)
+		req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("wronguser:wrongpass")))
+		
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		
+		if rr.Code != http.StatusUnauthorized {
+			t.Errorf("Expected status %d, got %d", http.StatusUnauthorized, rr.Code)
+		}
+		
+		// Check WWW-Authenticate header
+		if rr.Header().Get("WWW-Authenticate") != `Basic realm="ocis-ftp-bridge"` {
+			t.Errorf("Expected WWW-Authenticate header, got %s", rr.Header().Get("WWW-Authenticate"))
+		}
+	})
+	
+	t.Run("no authorization header", func(t *testing.T) {
+		middleware := BasicAuthMiddleware("testuser", "testpass")
+		handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		
+		req := httptest.NewRequest("GET", "/metrics", nil)
+		// No Authorization header
+		
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		
+		if rr.Code != http.StatusUnauthorized {
+			t.Errorf("Expected status %d, got %d", http.StatusUnauthorized, rr.Code)
+		}
+	})
+	
+	t.Run("healthz endpoint bypasses auth", func(t *testing.T) {
+		middleware := BasicAuthMiddleware("testuser", "testpass")
+		handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		
+		req := httptest.NewRequest("GET", "/healthz", nil)
+		// No Authorization header, but should bypass for healthz
+		
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		
+		if rr.Code != http.StatusOK {
+			t.Errorf("Expected status %d for healthz, got %d", http.StatusOK, rr.Code)
+		}
+	})
+}
+
+func TestBearerAuthMiddleware(t *testing.T) {
+	t.Run("valid token", func(t *testing.T) {
+		middleware := BearerAuthMiddleware("valid-token-123")
+		handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		
+		req := httptest.NewRequest("GET", "/metrics", nil)
+		req.Header.Set("Authorization", "Bearer valid-token-123")
+		
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		
+		if rr.Code != http.StatusOK {
+			t.Errorf("Expected status %d, got %d", http.StatusOK, rr.Code)
+		}
+	})
+	
+	t.Run("invalid token", func(t *testing.T) {
+		middleware := BearerAuthMiddleware("valid-token-123")
+		handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		
+		req := httptest.NewRequest("GET", "/metrics", nil)
+		req.Header.Set("Authorization", "Bearer invalid-token-456")
+		
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		
+		if rr.Code != http.StatusUnauthorized {
+			t.Errorf("Expected status %d, got %d", http.StatusUnauthorized, rr.Code)
+		}
+	})
+	
+	t.Run("healthz endpoint bypasses auth", func(t *testing.T) {
+		middleware := BearerAuthMiddleware("valid-token-123")
+		handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		
+		req := httptest.NewRequest("GET", "/healthz", nil)
+		// No Authorization header, but should bypass for healthz
+		
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		
+		if rr.Code != http.StatusOK {
+			t.Errorf("Expected status %d for healthz, got %d", http.StatusOK, rr.Code)
+		}
 	})
 }

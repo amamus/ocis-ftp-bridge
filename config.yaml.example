@@ -31,15 +31,37 @@ server:
   # TLS configuration for explicit FTPS
   tls:
     # Enable TLS for explicit FTPS (AUTH TLS)
-    enabled: false
+    # Enabled by default for security. Plain FTP is insecure.
+    enabled: true
     
     # Path to TLS certificate file (PEM format)
     # Required when enabled: true
+    # Generate a self-signed certificate for testing:
+    #   openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes
     cert: "/etc/ssl/certs/ocis-ftp-bridge.crt"
     
     # Path to TLS private key file (PEM format)
     # Required when enabled: true
     key: "/etc/ssl/private/ocis-ftp-bridge.key"
+
+  # ==========================================================================
+  # Rate Limiting Configuration
+  # ==========================================================================
+  # Rate limiting protects against brute-force attacks and resource exhaustion
+  rate_limiting:
+    # Maximum connections per IP address (0 = unlimited)
+    max_connections_per_ip: 10
+    
+    # Maximum total concurrent connections (0 = unlimited)
+    max_global_connections: 100
+    
+    # Authentication attempt rate limiting
+    max_auth_attempts_per_ip: 5     # Maximum failed auth attempts per IP
+    auth_attempt_window: 1m        # Time window for counting attempts
+    auth_lockout_duration: 5m      # Duration to lock out IP after exceeding limit
+    
+    # Enable/disable rate limiting (default: true)
+    track_failed_attempts: true
 
 # ============================================================================
 # oCIS Configuration
@@ -77,7 +99,19 @@ observability:
 # ============================================================================
 http:
   # Address for health, readiness, and metrics endpoints
-  address: ":9200"
+  address: ":9090"
+  
+  # Authentication configuration for HTTP endpoints
+  # Enabled by default for security
+  auth:
+    enabled: true  # Enable authentication (recommended for production)
+    method: basic  # Authentication method: basic, bearer, or none
+    username: admin  # HTTP basic auth username
+    # password: ""  # Password - auto-generated if empty, set explicitly for production
+    # Alternative: Use bearer token authentication
+    # method: bearer
+    # bearer_token: "your-secret-token"
+    # bearer_token_env: "HTTP_AUTH_TOKEN"  # Or source from environment variable
 
 # ============================================================================
 # FTP Account Configuration
