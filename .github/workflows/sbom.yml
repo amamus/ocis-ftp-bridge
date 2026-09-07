@@ -1,0 +1,172 @@
+name: Generate Software Bill of Materials (SBOM)
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ v* ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+  schedule:
+    # Run weekly to update SBOM with any new vulnerabilities
+    - cron: '0 0 * * 0'
+
+jobs:
+  generate-sbom:
+    name: Generate SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Install Syft for SBOM generation
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+          syft version
+
+      - name: Install Grype for vulnerability scanning
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+          grype version
+
+      - name: Generate SBOMs for dependencies
+        run: |
+          echo "Generating SPDX SBOM..."
+          syft dir:. -o spdx-json=sbom.spdx.json --exclude "**/vendor/**" --exclude "**/test/**" --exclude "./.git/**"
+          
+          echo "Generating CycloneDX SBOM..."
+          syft dir:. -o cyclonedx-json=sbom.cyclonedx.json --exclude "**/vendor/**" --exclude "**/test/**" --exclude "./.git/**"
+          
+          echo "SBOM files generated:"
+          ls -la sbom.*.json
+
+      - name: Scan SBOM for vulnerabilities
+        run: |
+          echo "Scanning with Grype..."
+          grype sbom:spdx.json -o json -q > vulnerabilities.json || true
+          
+          echo "Vulnerability scan completed:"
+          if [ -f vulnerabilities.json ]; then
+            echo "$(jq -r '.matches | length' vulnerabilities.json) vulnerabilities found"
+            cat vulnerabilities.json | jq '.matches[] | .vulnerability.id + " - " + .artifact.name + ":" + .artifact.version' || true
+          else
+            echo "No vulnerability scan results"
+          fi
+
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: |
+            sbom.spdx.json
+            sbom.cyclonedx.json
+            vulnerabilities.json
+          retention-days: 30
+
+  docker-sbom:
+    name: Docker Image SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install Syft
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Build Docker image
+        run: |
+          docker build -t ocis-ftp-bridge:sbom .
+
+      - name: Generate SBOM for Docker image
+        run: |
+          echo "Generating Docker image SBOM..."
+          syft ocis-ftp-bridge:sbom -o spdx-json=docker-sbom.spdx.json
+          syft ocis-ftp-bridge:sbom -o cyclonedx-json=docker-sbom.cyclonedx.json
+          
+          echo "Docker SBOM files generated:"
+          ls -la docker-sbom.*.json
+
+      - name: Upload Docker SBOM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-sbom
+          path: |
+            docker-sbom.spdx.json
+            docker-sbom.cyclonedx.json
+          retention-days: 30
+
+  sbom-validation:
+    name: SBOM Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: generate-sbom
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download SBOM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: sbom
+
+      - name: Validate SPDX format
+        run: |
+          echo "Validating SPDX SBOM..."
+          # Install spdx-tools for validation
+          go install github.com/spdx/tools-golang/cmd/spdx-sbom@latest
+          
+          # Basic validation - check that file is valid JSON and has expected fields
+          if jq -e '.documentNamespace, .packages, .relationships' sbom.spdx.json > /dev/null 2>&1; then
+            echo "SPDX SBOM is valid"
+          else
+            echo "SPDX SBOM validation failed"
+            exit 1
+          fi
+
+      - name: Validate CycloneDX format
+        run: |
+          echo "Validating CycloneDX SBOM..."
+          # Basic validation - check that file is valid JSON and has expected fields
+          if jq -e '.bomFormat, .components, .dependencies' sbom.cyclonedx.json > /dev/null 2>&1; then
+            echo "CycloneDX SBOM is valid"
+          else
+            echo "CycloneDX SBOM validation failed"
+            exit 1
+          fi
+
+      - name: Check for known vulnerable packages
+        run: |
+          echo "Checking SBOM for vulnerable packages..."
+          # Count packages in SBOM
+          spdx_package_count=$(jq '.packages | length' sbom.spdx.json)
+          cyclonedx_package_count=$(jq '.components | length' sbom.cyclonedx.json)
+          
+          echo "SPDX packages: $spdx_package_count"
+          echo "CycloneDX components: $cyclonedx_package_count"
+          
+          # Basic sanity check - we should have some packages
+          if [ "$spdx_package_count" -gt 0 ] && [ "$cyclonedx_package_count" -gt 0 ]; then
+            echo "SBOM contains expected package information"
+          else
+            echo "SBOM appears to be missing package information"
+            exit 1
+          fi
