@@ -4,14 +4,53 @@ Thank you for your interest in contributing to the ocis-ftp-bridge project! This
 
 ## Code of Conduct
 
-This project follows a simple code of conduct: **Be respectful and professional**. We expect all contributors to:
+This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md).
+By participating in this community, you agree to abide by its terms.
+
+In summary, we expect all contributors to:
 
 - Be welcoming and inclusive
 - Respect different viewpoints and experiences
 - Gracefully accept constructive criticism
 - Focus on what is best for the project and its users
 
-Violations of the code of conduct may result in removal from the project.
+Violations of the code of conduct may be reported via GitHub issues or discussions
+and will be investigated promptly and fairly.
+
+## Developer Certificate of Origin (DCO)
+
+This project uses the Developer Certificate of Origin (DCO) as its contributor
+license agreement. The DCO is a lightweight way for contributors to certify that
+they have the right to submit the code they are contributing to the project.
+
+### How to sign off
+
+To certify that your contribution complies with the DCO, add a `Signed-off-by:`
+line to your commit message:
+
+```
+This is my commit message
+
+Signed-off-by: Your Name <your.email@example.com>
+```
+
+You can automatically add this line using `git commit -s` or `git commit -S`.
+
+### Why DCO?
+
+The DCO is a well-established standard in the Open Source community. It provides
+legal protection for both contributors and maintainers while being much simpler
+than traditional CLAs. The DCO ensures that:
+
+1. You have the right to submit the contribution
+2. The contribution is properly licensed
+3. You accept responsibility for your contributions
+
+### More information
+
+- [DCO Website](https://developercertificate.org/)
+- [DCO FAQ](https://github.com/probot/dco/blob/master/README.md)
+- [Linux Foundation DCO](https://www.linuxfoundation.org/legal/dco/)
 
 ## Getting Started
 
