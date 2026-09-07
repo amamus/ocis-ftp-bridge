@@ -16,6 +16,15 @@ spool:
   directory: /var/lib/ocis-ftp/spool
   max_total_size: 2GiB
 
+# Logging configuration
+observability:
+  debug: false  # Enable debug mode
+  logger:
+    level: info  # Log level: debug, info, warn, error
+    format: json  # Log format: json, text
+    output: stdout  # Log output: stdout, stderr, or file path
+    add_source: true  # Include source file and line number in logs
+
 accounts:
   - username: reception
     # Example-only syntactically valid Argon2id PHC value. Generate your own hash.
