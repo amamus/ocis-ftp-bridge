@@ -31,10 +31,13 @@ server:
   # TLS configuration for explicit FTPS
   tls:
     # Enable TLS for explicit FTPS (AUTH TLS)
-    enabled: false
+    # Enabled by default for security. Plain FTP is insecure.
+    enabled: true
     
     # Path to TLS certificate file (PEM format)
     # Required when enabled: true
+    # Generate a self-signed certificate for testing:
+    #   openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes
     cert: "/etc/ssl/certs/ocis-ftp-bridge.crt"
     
     # Path to TLS private key file (PEM format)

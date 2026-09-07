@@ -5,9 +5,11 @@ server:
     max_port: 30020
     public_ip: ""
   tls:
-    enabled: false
-    cert: /etc/ocis-ftp/tls.crt
-    key: /etc/ocis-ftp/tls.key
+    # TLS is enabled by default for security
+    # Plain FTP (unencrypted) is insecure and exposes credentials and data
+    enabled: true
+    cert: /etc/ocis-ftp/tls.crt  # Path to TLS certificate
+    key: /etc/ocis-ftp/tls.key   # Path to TLS private key
 
 ocis:
   url: https://cloud.example.com
