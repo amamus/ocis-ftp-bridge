@@ -173,18 +173,15 @@ func (s *OperationsServer) checkSpoolDirectory() error {
 		return fmt.Errorf("spool path %q is not a directory", s.spoolDirectory)
 	}
 	
-	// Check if directory is writable
-	// Try to create a test file and remove it
-	testFile := filepath.Join(s.spoolDirectory, ".healthcheck_test")
+	// Check if directory is writable using a more reliable method
+	// Use a unique filename to avoid race conditions
+	testFile := filepath.Join(s.spoolDirectory, fmt.Sprintf(".healthcheck_test_%d_%s", os.Getpid(), time.Now().Format("20060102150405")))
 	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
 		return fmt.Errorf("spool directory %q is not writable: %w", s.spoolDirectory, err)
 	}
 	
-	// Clean up the test file
-	if err := os.Remove(testFile); err != nil && !os.IsNotExist(err) {
-		// Log but don't fail the health check for cleanup failure
-		fmt.Printf("Warning: failed to clean up health check test file: %v\n", err)
-	}
+	// Clean up the test file - best effort, don't fail health check on cleanup issues
+	_ = os.Remove(testFile)
 	
 	return nil
 }
