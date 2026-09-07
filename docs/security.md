@@ -46,11 +46,11 @@ The bridge operates with the following trust model:
 **WARNING**: Plain FTP transmits credentials and file contents in cleartext.
 
 **MANDATORY REQUIREMENTS:**
-- ✅ Deploy bridge on isolated network segment (printer VLAN)
-- ✅ Restrict bridge access to printer IPs only
-- ✅ Block all external access to FTP ports (2121, passive range)
-- ✅ Use firewall rules to prevent FTP traffic from leaving isolated network
-- ✅ Never expose FTP ports to the Internet
+- Deploy bridge on isolated network segment (printer VLAN)
+- Restrict bridge access to printer IPs only
+- Block all external access to FTP ports (2121, passive range)
+- Use firewall rules to prevent FTP traffic from leaving isolated network
+- Never expose FTP ports to the Internet
 
 **Network Diagram:**
 ```
@@ -94,10 +94,10 @@ The bridge operates with the following trust model:
 **RECOMMENDED** for production deployments.
 
 **REQUIREMENTS:**
-- ✅ Valid TLS certificates for bridge hostname
-- ✅ Certificate chain trusted by printer clients
-- ✅ All FTP traffic (control and data) encrypted
-- ✅ Still requires network isolation for defense in depth
+- Valid TLS certificates for bridge hostname
+- Certificate chain trusted by printer clients
+- All FTP traffic (control and data) encrypted
+- Still requires network isolation for defense in depth
 
 **Certificate Requirements:**
 - Subject: Bridge hostname (e.g., `ftp-bridge.example.com`)
@@ -117,10 +117,10 @@ RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 USER appuser
 ```
 
-- ✅ Container user: `appuser` (UID 1000)
-- ✅ Container group: `appgroup` (GID 1000)
-- ✅ No root privileges
-- ✅ Writable volumes owned by appuser
+- Container user: `appuser` (UID 1000)
+- Container group: `appgroup` (GID 1000)
+- No root privileges
+- Writable volumes owned by appuser
 
 #### Filesystem Permissions
 
@@ -140,11 +140,11 @@ USER appuser
 **NEVER bake secrets into container images:**
 
 ```yaml
-# ❌ BAD - Secrets in image
+# BAD - Secrets in image
 FROM alpine:3.20
 COPY config-with-secrets.yaml /app/config.yaml
 
-# ✅ GOOD - Secrets mounted at runtime
+# GOOD - Secrets mounted at runtime
 volumes:
   - ./secrets:/app/secrets:ro
 ```
@@ -223,13 +223,13 @@ accounts:
 ```
 # Account root: /uploads
 
-# ✅ ALLOWED
+# ALLOWED
 - scan.pdf
 - folder/subfolder/file.txt
 - file with spaces.txt
 - file-with-unicode-📄.pdf
 
-# ❌ BLOCKED
+# BLOCKED
 - /etc/passwd                          (absolute path)
 - ../../../etc/passwd                  (traversal)
 - folder/../../etc/passwd             (traversal in path)
@@ -261,13 +261,13 @@ spool:
 
 **Never Log Secrets:**
 ```go
-// ❌ BAD - Logging sensitive data
+// BAD - Logging sensitive data
 log.Printf("Uploading with token: %s", appToken)
 
-// ✅ GOOD - Redacted logging
+// GOOD - Redacted logging
 log.Printf("Uploading with token: [REDACTED]")
 
-// ✅ GOOD - Structured logging with redaction
+// GOOD - Structured logging with redaction
 log.Info("upload start", 
     "user", user,
     "token", "[REDACTED]",
@@ -799,6 +799,154 @@ curl http://localhost:9200/metrics | grep ocis_ftp_upload_failures
 # oCIS request errors
 curl http://localhost:9200/metrics | grep ocis_requests_total{status="5xx"}
 ```
+
+## Software Bill of Materials (SBOM)
+
+### Overview
+
+The ocis-ftp-bridge generates comprehensive Software Bill of Materials (SBOM) to provide full transparency into the software supply chain. SBOMs are automatically generated and updated as part of the CI/CD pipeline.
+
+### SBOM Formats
+
+The project generates SBOMs in two industry-standard formats:
+
+1. **SPDX 2.3** (ISO/IEC 5962:2021) - `sbom.spdx.json`
+2. **CycloneDX 1.4** - `sbom.cyclonedx.json`
+
+Both formats are widely supported by security tools, compliance frameworks, and vulnerability scanners.
+
+### SBOM Contents
+
+The SBOMs include:
+
+- **Dependencies**: All direct and transitive Go module dependencies
+- **Licenses**: License information for all components
+- **Components**: Detailed information about each software component
+- **Relationships**: How components depend on each other
+- **External References**: PURLs (Package URLs) for vulnerability identification
+- **Vulnerability Data**: Known vulnerabilities in dependencies (via Grype scanning)
+
+### SBOM Generation
+
+#### Automatic Generation
+
+SBOMs are automatically generated:
+- On every push to `main` branch
+- On every pull request to `main` branch  
+- On tag creation (releases)
+- Weekly (every Sunday at midnight UTC)
+
+#### Manual Generation
+
+You can manually generate SBOMs using Syft:
+
+```bash
+# Install Syft
+curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+
+# Generate SPDX SBOM
+syft dir:. -o spdx-json=sbom.spdx.json
+
+# Generate CycloneDX SBOM  
+syft dir:. -o cyclonedx-json=sbom.cyclonedx.json
+```
+
+#### Docker Image SBOM
+
+To generate an SBOM for the Docker image:
+
+```bash
+# Build the image
+docker build -t ocis-ftp-bridge .
+
+# Generate SBOM for the image
+syft ocis-ftp-bridge -o spdx-json=docker-sbom.spdx.json
+syft ocis-ftp-bridge -o cyclonedx-json=docker-sbom.cyclonedx.json
+```
+
+### SBOM Access
+
+#### Development/Testing
+
+- **GitHub Actions Artifacts**: SBOM files are available as downloadable artifacts in the SBOM workflow
+- **Repository Files**: SPDX and CycloneDX SBOMs are committed to the repository root on main branch
+
+#### Production Releases
+
+- **GitHub Releases**: SBOM files are included in release assets
+- **Release Artifacts**: Available in the release preparation workflow artifacts
+
+### SBOM Validation
+
+The CI pipeline validates that:
+- SBOM files are valid JSON
+- Required fields are present (packages, components, relationships)
+- License information is included
+- External references (PURLs) are generated
+
+### Vulnerability Scanning
+
+The SBOM workflow includes vulnerability scanning using Grype:
+
+- Scans the generated SBOM for known vulnerabilities
+- Reports findings with CVE IDs and severity levels
+- Results are available in the `vulnerabilities.json` artifact
+
+### Compliance Use Cases
+
+#### Regulatory Compliance
+
+SBOMs help meet requirements from:
+- **Executive Order 14028** (US Federal): Requires SBOM for software sold to federal agencies
+- **NIST SP 800-218**: Secure Software Development Framework guidelines
+- **ISO/IEC 5962**: International SBOM standard
+- **NTIA Minimum Elements**: US Department of Commerce SBOM guidelines
+
+#### Supply Chain Security
+
+- **Dependency Tracking**: Know exactly what's in your software
+- **Vulnerability Management**: Quickly identify affected components
+- **License Compliance**: Ensure all dependencies have compatible licenses
+- **Incident Response**: Rapidly determine if a disclosed vulnerability affects your deployment
+
+### SBOM Integration Examples
+
+#### GitHub Dependency Review
+
+```yaml
+# .github/dependabot.yml
+version: 2
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "security"
+```
+
+#### Vulnerability Alerting
+
+Use the SBOM with vulnerability scanning tools:
+
+```bash
+# Scan with Grype
+grype sbom:spdx.json -o json -q > vulnerabilities.json
+
+# Filter for high/critical vulnerabilities
+jq '.matches |= [.[] | select(.vulnerability.severity | ascii_downcase | contains("high") or contains("critical"))]' vulnerabilities.json
+```
+
+### SBOM Tools and Resources
+
+- **Syft**: https://github.com/anchore/syft (SBOM generation)
+- **Grype**: https://github.com/anchore/grype (vulnerability scanning)
+- **SPDX Specification**: https://spdx.dev/specification/
+- **CycloneDX Specification**: https://cyclonedx.org/specification/
+- **NTIA SBOM Guidelines**: https://www.ntia.doc.gov/SBOM
+- **NIST SSDF**: https://csrc.nist.gov/projects/ssdf
 
 ## Security Contacts
 
