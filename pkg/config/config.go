@@ -164,6 +164,81 @@ func New() *Config {
 	}
 }
 
+// checkForPlaintextCredentials scans the config file for potential plaintext credentials
+// This is a best-effort check to warn users about potential security issues
+func checkForPlaintextCredentials(filename string) error {
+	// Read the raw file content
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return nil // Can't read, skip check
+	}
+	
+	content := string(data)
+	
+	// Check for common patterns that might indicate plaintext passwords
+	// These are heuristic checks and may have false positives
+	passwordPatterns := []string{
+		"password:",
+		"password: ",
+		"passwd:",
+		"passwd: ",
+		"secret:",
+		"secret: ",
+		"token:",
+		"token: ",
+	}
+	
+	// Check for plaintext passwords that look like common passwords
+	// These are weak checks but can catch obvious issues
+	commonPasswords := []string{
+		"password",
+		"123456",
+		"qwerty",
+		"admin",
+		"letmein",
+		"welcome",
+		"secret",
+		"changeme",
+	}
+	
+	for _, pattern := range passwordPatterns {
+		if strings.Contains(content, pattern) {
+			// Check if it's followed by what looks like a plaintext password
+			lines := strings.Split(content, "\n")
+			for _, line := range lines {
+				if strings.Contains(line, pattern) {
+					// Extract the value after the pattern
+					parts := strings.SplitN(line, ":", 2)
+					if len(parts) > 1 {
+						value := strings.TrimSpace(parts[1])
+						// Skip if it looks like a hash (starts with $)
+						if strings.HasPrefix(value, "$") {
+							continue
+						}
+						// Skip if it's empty or in quotes (might be a reference)
+						if value == "" || strings.HasPrefix(value, "\"") || strings.HasPrefix(value, "'") {
+							continue
+						}
+						// Check if it matches a common password
+						for _, commonPW := range commonPasswords {
+							if strings.EqualFold(value, commonPW) {
+								return fmt.Errorf("potential plaintext password detected: %s", pattern)
+							}
+						}
+						// Check if it looks like a base64 token (common for oCIS tokens)
+						if len(value) > 20 && !strings.ContainsAny(value, " \t\n") {
+							// This might be a token - warn about it
+							return fmt.Errorf("potential plaintext credential detected: %s", pattern)
+						}
+					}
+				}
+			}
+		}
+	}
+	
+	return nil
+}
+
 func LoadFile(filename string) (*Config, error) {
 	return LoadFileWithEnv(filename, os.LookupEnv)
 }
@@ -184,6 +259,12 @@ func LoadFileWithEnv(filename string, lookupEnv func(string) (string, bool)) (*C
 	dec.KnownFields(true)
 	if err := dec.Decode(cfg); err != nil {
 		return nil, fmt.Errorf("decode configuration %q: %w", filename, err)
+	}
+	
+	// Security check: warn if config file contains potential plaintext passwords
+	// This is a best-effort check to prevent accidental credential exposure
+	if err := checkForPlaintextCredentials(filename); err != nil {
+		slog.Warn("Potential security issue in configuration", "file", filename, "error", err)
 	}
 
 	accountsMap := make(map[string]bool, len(cfg.Accounts))
@@ -247,8 +328,21 @@ func (c *Config) validateWithEnv(lookupEnv func(string) (string, bool)) error {
 		}
 		seen[account.Username] = struct{}{}
 
+		// Validate password hash
 		if _, err := parseArgon2ID(account.PasswordHash); err != nil {
 			return fmt.Errorf("%s.password_hash: %w", prefix, err)
+		}
+		
+		// Check for known example/test password hashes
+		// These are commonly used in examples and should not be used in production
+	exampleHashes := []string{
+			"$argon2id$v=19$m=65536,t=3,p=1$MDEyMzQ1Njc4OWFiY2RlZg$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+			"$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJC1OeqncgJ2almHUfLnhtRTVrjD8zGQ",
+		}
+		for _, exampleHash := range exampleHashes {
+			if strings.Contains(account.PasswordHash, exampleHash) {
+				return fmt.Errorf("%s.password_hash: example/default hash detected. Generate a unique hash for production use", prefix)
+			}
 		}
 		if strings.TrimSpace(account.OCIS.Username) == "" {
 			return fmt.Errorf("%s.ocis.username is required", prefix)

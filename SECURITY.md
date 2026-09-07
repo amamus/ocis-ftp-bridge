@@ -142,6 +142,12 @@ govulncheck ./...
 4. **Resource Limits**: Configure appropriate limits for your environment
 5. **Certificate Management**: Monitor certificate validity and rotate regularly
 6. **Incident Response**: Have a plan for security incidents
+7. **Credential Management**: 
+   - Always use password hashes (Argon2id), never plaintext passwords
+   - Store oCIS App Tokens in environment variables, not in config files
+   - Use unique credentials for each FTP account
+   - Rotate credentials regularly
+   - Restrict file permissions on configuration files (readable only by service account)
 
 ### For Developers
 
@@ -151,6 +157,73 @@ govulncheck ./...
 4. **Fuzzing**: Test with malformed inputs and edge cases
 5. **Secure Defaults**: Always choose secure defaults for configuration
 6. **Error Handling**: Never leak sensitive information in errors or logs
+
+## Credential Management
+
+### Password Storage
+
+**NEVER store plaintext passwords in configuration files.**
+
+The ocis-ftp-bridge uses Argon2id password hashing (PHC format). To generate a password hash:
+
+```bash
+# Using htpasswd (recommended)
+htpasswd -B -C 12 -i -d password | tr -d '\n'
+
+# Using the built-in Go tool
+go run cmd/hash-password/main.go
+```
+
+Example hash format:
+```
+$argon2id$v=19$m=65536,t=3,p=4$salt$hash
+```
+
+### oCIS App Token Storage
+
+**NEVER store oCIS App Tokens directly in configuration files.**
+
+Use environment variables to provide App Tokens:
+
+```yaml
+# In config.yaml
+ocis:
+  username: "service-account"
+  app_token_env: "OCIS_APP_TOKEN"  # Name of environment variable
+```
+
+```bash
+# Set the environment variable before starting
+export OCIS_APP_TOKEN="your-ocis-app-token-here"
+
+# Or use a .env file with a tool like direnv
+```
+
+For container deployments, use Kubernetes Secrets or Docker secrets:
+
+```yaml
+# Kubernetes example
+env:
+  - name: OCIS_APP_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: ocis-credentials
+        key: app-token
+```
+
+### Configuration File Security
+
+1. **File Permissions**: Restrict configuration files to be readable only by the service account
+   ```bash
+   chmod 600 config.yaml
+   chown ocis-ftp:ocis-ftp config.yaml
+   ```
+
+2. **File Location**: Store configuration files in a secure location, not in the web root
+
+3. **Backup**: Regularly backup configuration files, but ensure backups are also secured
+
+4. **Version Control**: Never commit configuration files with real credentials to version control
 
 ## Security Advisories
 
