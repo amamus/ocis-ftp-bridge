@@ -13,8 +13,17 @@ import (
 	"path"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/amamus/ocis-ftp-bridge/pkg/graph"
+)
+
+// Path validation constants
+const (
+	// MaxPathLength is the maximum allowed length for WebDAV paths in bytes
+	MaxPathLength = 4096
+	// MaxFilenameLength is the maximum allowed length for filenames in bytes
+	MaxFilenameLength = 255
 )
 
 // webdavClient is the concrete implementation of Client.
@@ -414,10 +423,36 @@ func (c *webdavClient) normalizePath(p string) (string, error) {
 		return "", ErrInvalidPath
 	}
 
-	// Prevent path traversal by checking for .. in the original path
-	// Also check if the path tries to escape the root
+	// Validate path length to prevent buffer overflow attacks
+	if len(p) > MaxPathLength {
+		return "", fmt.Errorf("%w: path length %d exceeds maximum of %d", ErrInvalidPath, len(p), MaxPathLength)
+	}
+
+	// Validate UTF-8 encoding
+	if !utf8.ValidString(p) {
+		return "", fmt.Errorf("%w: path contains invalid UTF-8 sequences", ErrInvalidPath)
+	}
+
+	// Prevent path traversal by checking for various traversal patterns
 	if strings.Contains(p, "..") {
 		return "", ErrPathTraversal
+	}
+
+	// Check for Windows-specific traversal patterns
+	if strings.Contains(p, "\\..\\") || strings.Contains(p, "\\..") || strings.Contains(p, "..\\") {
+		return "", ErrPathTraversal
+	}
+
+	// Check for drive letters (Windows)
+	if len(p) >= 2 && p[1] == ':' {
+		return "", fmt.Errorf("%w: absolute Windows paths not allowed", ErrInvalidPath)
+	}
+
+	// Check for null bytes and control characters
+	for _, r := range p {
+		if r == 0 || (r < 32 && r != '/' && r != '.' && r != '_' && r != '-') {
+			return "", fmt.Errorf("%w: path contains invalid control characters", ErrInvalidPath)
+		}
 	}
 
 	// Clean the path to remove . components and normalize slashes
@@ -431,6 +466,11 @@ func (c *webdavClient) normalizePath(p string) (string, error) {
 	// Ensure the path starts with a slash for absolute paths
 	if !strings.HasPrefix(cleanPath, "/") {
 		cleanPath = "/" + cleanPath
+	}
+
+	// Final length check after normalization
+	if len(cleanPath) > MaxPathLength {
+		return "", fmt.Errorf("%w: normalized path length %d exceeds maximum of %d", ErrInvalidPath, len(cleanPath), MaxPathLength)
 	}
 
 	// URL encode the path components properly

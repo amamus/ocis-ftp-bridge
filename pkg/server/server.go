@@ -28,6 +28,7 @@ type service struct {
 	cfg            *config.Config
 	obs            observability.Client
 	spoolManager   spool.Manager
+	spoolMonitor   spool.SpoolMonitor
 	graphClient    graph.Client
 	webdavClient   webdav.Client
 	ftpServer      ftp.Server
@@ -64,12 +65,22 @@ func New(cfg *config.Config, obs observability.Client) (Server, error) {
 	ftpServer := ftp.NewServer(ftpDriver)
 
 	// Initialize HTTP operations server
-	httpServer := http.NewOperationsServer(cfg.HTTP.Address)
+	httpServer := http.NewOperationsServer(cfg.HTTP.Address, cfg)
+
+	// Initialize spool monitor
+	// Get the spool capacity from the spool manager
+	_, capacity, err := spoolMgr.GetUsage()
+	if err != nil {
+		// If we can't get usage, use the configured max total size
+		capacity = uint64(cfg.Spool.MaxTotalSize)
+	}
+	spoolMonitor := spool.StartSpoolMonitor(cfg.Spool.Directory, capacity, cfg.Spool.Monitoring, httpServer)
 
 	return &service{
 		cfg:            cfg,
 		obs:            obs,
 		spoolManager:   spoolMgr,
+		spoolMonitor:   spoolMonitor,
 		graphClient:    graphClient,
 		webdavClient:   webdavClient,
 		ftpServer:      ftpServer,
@@ -130,6 +141,11 @@ func (s *service) Run(ctx context.Context) error {
 	// Shutdown HTTP server
 	if err := s.stopHTTPServer(); err != nil {
 		s.obs.Log("error", fmt.Sprintf("HTTP server shutdown error: %v", err))
+	}
+
+	// Shutdown spool monitor
+	if s.spoolMonitor != nil {
+		s.spoolMonitor.Stop()
 	}
 
 	// Wait for all servers to stop
