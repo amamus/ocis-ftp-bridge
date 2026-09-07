@@ -76,6 +76,13 @@ type OperationsServer struct {
 	ftpUploadBytesTotal    prometheus.Collector
 	ftpUploadDuration      prometheus.Collector
 	ocisRequestsTotal      prometheus.Collector
+	
+	// Spool metrics
+	SpoolSizeBytes           prometheus.Collector
+	SpoolFileCount           prometheus.Collector
+	SpoolCapacityBytes       prometheus.Collector
+	SpoolUsagePercent        prometheus.Collector
+	SpoolCapacityExceededTotal prometheus.Collector
 }
 
 // NewOperationsServer creates a new operations HTTP server
@@ -257,6 +264,52 @@ func NewOperationsServer(address string, cfg *config.Config) *OperationsServer {
 		[]string{"service", "status"},
 	)
 
+	// Spool metrics
+	spoolSizeBytes := prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "ocis_ftp",
+			Subsystem: "spool",
+			Name:      "size_bytes",
+			Help:      "Current size of the spool directory in bytes",
+		},
+	)
+
+	spoolFileCount := prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "ocis_ftp",
+			Subsystem: "spool",
+			Name:      "file_count",
+			Help:      "Current number of files in the spool directory",
+		},
+	)
+
+	spoolCapacityBytes := prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "ocis_ftp",
+			Subsystem: "spool",
+			Name:      "capacity_bytes",
+			Help:      "Maximum capacity of the spool directory in bytes",
+		},
+	)
+
+	spoolUsagePercent := prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "ocis_ftp",
+			Subsystem: "spool",
+			Name:      "usage_percent",
+			Help:      "Current spool usage as percentage of capacity",
+		},
+	)
+
+	spoolCapacityExceededTotal := prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: "ocis_ftp",
+			Subsystem: "spool",
+			Name:      "capacity_exceeded_total",
+			Help:      "Total number of times spool capacity has been exceeded",
+		},
+	)
+
 	// Register all metrics
 	registry.MustRegister(
 		ftpSessionsTotal,
@@ -266,6 +319,11 @@ func NewOperationsServer(address string, cfg *config.Config) *OperationsServer {
 		ftpUploadBytesTotal,
 		ftpUploadDuration,
 		ocisRequestsTotal,
+		spoolSizeBytes,
+		spoolFileCount,
+		spoolCapacityBytes,
+		spoolUsagePercent,
+		spoolCapacityExceededTotal,
 	)
 
 	// Store configuration
@@ -310,6 +368,11 @@ func NewOperationsServer(address string, cfg *config.Config) *OperationsServer {
 		ftpUploadBytesTotal:   ftpUploadBytesTotal,
 		ftpUploadDuration:     ftpUploadDuration,
 		ocisRequestsTotal:     ocisRequestsTotal,
+		SpoolSizeBytes:        spoolSizeBytes,
+		SpoolFileCount:        spoolFileCount,
+		SpoolCapacityBytes:    spoolCapacityBytes,
+		SpoolUsagePercent:     spoolUsagePercent,
+		SpoolCapacityExceededTotal: spoolCapacityExceededTotal,
 	}
 
 	// Health endpoint
@@ -507,5 +570,42 @@ func (s *OperationsServer) ObserveUploadDuration(duration time.Duration, status 
 func (s *OperationsServer) IncrementOcisRequestsTotal(service, status string) {
 	if cv, ok := s.ocisRequestsTotal.(*prometheus.CounterVec); ok {
 		cv.WithLabelValues(service, status).Inc()
+	}
+}
+
+// Spool monitoring methods
+
+// SetSpoolSizeBytes sets the current spool size in bytes
+func (s *OperationsServer) SetSpoolSizeBytes(size uint64) {
+	if g, ok := s.SpoolSizeBytes.(prometheus.Gauge); ok {
+		g.Set(float64(size))
+	}
+}
+
+// SetSpoolFileCount sets the current number of files in spool
+func (s *OperationsServer) SetSpoolFileCount(count uint64) {
+	if g, ok := s.SpoolFileCount.(prometheus.Gauge); ok {
+		g.Set(float64(count))
+	}
+}
+
+// SetSpoolCapacityBytes sets the spool capacity in bytes
+func (s *OperationsServer) SetSpoolCapacityBytes(capacity uint64) {
+	if g, ok := s.SpoolCapacityBytes.(prometheus.Gauge); ok {
+		g.Set(float64(capacity))
+	}
+}
+
+// SetSpoolUsagePercent sets the spool usage percentage
+func (s *OperationsServer) SetSpoolUsagePercent(percent float64) {
+	if g, ok := s.SpoolUsagePercent.(prometheus.Gauge); ok {
+		g.Set(percent)
+	}
+}
+
+// IncrementSpoolCapacityExceededTotal increments the spool capacity exceeded counter
+func (s *OperationsServer) IncrementSpoolCapacityExceededTotal() {
+	if c, ok := s.SpoolCapacityExceededTotal.(prometheus.Counter); ok {
+		c.Inc()
 	}
 }

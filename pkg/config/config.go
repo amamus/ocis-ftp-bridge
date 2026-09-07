@@ -123,6 +123,20 @@ type SpoolConfig struct {
 	Directory    string   `yaml:"directory" json:"directory"`
 	MaxTotalSize ByteSize `yaml:"max_total_size" json:"max_total_size"`
 	MaxSize      uint64   `yaml:"-" json:"-"`
+	// Monitoring configuration
+	Monitoring MonitoringConfig `yaml:"monitoring" json:"monitoring"`
+}
+
+// MonitoringConfig contains spool monitoring settings
+type MonitoringConfig struct {
+	// Enabled enables spool monitoring (default: true)
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// WarningThreshold is the percentage usage at which to log warnings (default: 80%)
+	WarningThreshold float64 `yaml:"warning_threshold" json:"warning_threshold"`
+	// CriticalThreshold is the percentage usage at which to log critical alerts (default: 95%)
+	CriticalThreshold float64 `yaml:"critical_threshold" json:"critical_threshold"`
+	// CheckInterval is how often to check spool usage (default: 30s)
+	CheckInterval time.Duration `yaml:"check_interval" json:"check_interval"`
 }
 
 type AccountConfig struct {
@@ -205,6 +219,12 @@ func New() *Config {
 			Directory:    "/var/tmp/ocis-ftp-bridge-spool",
 			MaxTotalSize: ByteSize(1024 * 1024 * 1024),
 			MaxSize:      1024 * 1024 * 1024,
+			Monitoring: MonitoringConfig{
+				Enabled:           true,
+				WarningThreshold:  80.0,  // Warn at 80% usage
+				CriticalThreshold: 95.0,  // Alert at 95% usage
+				CheckInterval:     30 * time.Second, // Check every 30 seconds
+			},
 		},
 		HTTP: HTTPConfig{
 			Address: ":9090",
