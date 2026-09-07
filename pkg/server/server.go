@@ -43,6 +43,12 @@ func New(cfg *config.Config, obs observability.Client) (Server, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidConfig, err)
 	}
+	
+	// Validate TLS configuration at startup
+	// This ensures that if TLS is enabled, the certificates are valid
+	if err := cfg.ValidateTLSConfig(); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidConfig, err)
+	}
 
 	spoolMgr, err := initializeSpool(cfg)
 	if err != nil {
