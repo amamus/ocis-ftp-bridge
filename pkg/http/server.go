@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/amamus/ocis-ftp-bridge/pkg/config"
+	"github.com/amamus/ocis-ftp-bridge/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -608,4 +609,44 @@ func (s *OperationsServer) IncrementSpoolCapacityExceededTotal() {
 	if c, ok := s.SpoolCapacityExceededTotal.(prometheus.Counter); ok {
 		c.Inc()
 	}
+}
+
+// ErrorResponse represents a structured error response for API endpoints.
+type ErrorResponse struct {
+	Error struct {
+		Code    string                 `json:"code"`
+		Message string                 `json:"message"`
+		Details map[string]interface{} `json:"details,omitempty"`
+	} `json:"error"`
+}
+
+// NewErrorResponse creates a new error response from an error.
+// If the error is an AppError, it extracts the code, message, and details.
+// Otherwise, it uses INTERNAL_ERROR as the code.
+func NewErrorResponse(err error) ErrorResponse {
+	code := errors.GetCode(err)
+	message := errors.GetMessage(err)
+	details := errors.GetDetails(err)
+
+	// If we couldn't extract details, use empty map
+	if details == nil {
+		details = make(map[string]interface{})
+	}
+
+	return ErrorResponse{
+		Error: struct {
+			Code    string                 `json:"code"`
+			Message string                 `json:"message"`
+			Details map[string]interface{} `json:"details,omitempty"`
+		}{
+			Code:    string(code),
+			Message: message,
+			Details: details,
+		},
+	}
+}
+
+// GetHTTPStatus returns the appropriate HTTP status code for an error.
+func GetHTTPStatus(err error) int {
+	return errors.HTTPStatus(err)
 }
