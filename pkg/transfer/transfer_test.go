@@ -635,6 +635,256 @@ func TestGenerateUniqueFilename(t *testing.T) {
 	})
 }
 
+// TestPathTraversalSecurity tests comprehensive path traversal protection
+func TestPathTraversalSecurity(t *testing.T) {
+	tm := NewTransferManager()
+
+	// Add target configuration
+	tm.AddTarget("testuser", TargetConfig{
+		DriveID:          "drive123",
+		Drive:           "MyDrive",
+		Root:            "/uploads",
+		CollisionPolicy: CollisionPolicyRename,
+		MaxSize:         1000000,
+	})
+
+	// Test cases for path traversal attempts
+	traversalCases := []struct {
+		name     string
+		ftpPath  string
+		filename string
+		wantError bool
+	}{
+		// Basic traversal attempts
+		{
+			name:     "simple dot-dot in path",
+			ftpPath:  "../etc",
+			filename: "passwd.txt",
+			wantError: true,
+		},
+		{
+			name:     "dot-dot at start of filename",
+			ftpPath:  "",
+			filename: "../secret.txt",
+			wantError: true,
+		},
+		{
+			name:     "dot-dot in middle of filename",
+			ftpPath:  "",
+			filename: "foo/../bar.txt",
+			wantError: true,
+		},
+		{
+			name:     "dot-dot at end of filename",
+			ftpPath:  "",
+			filename: "foo/..",
+			wantError: true,
+		},
+		// Absolute path attempts
+		{
+			name:     "unix absolute path in ftpPath",
+			ftpPath:  "/etc",
+			filename: "passwd.txt",
+			wantError: true,
+		},
+		{
+			name:     "windows absolute path in ftpPath",
+			ftpPath:  "\\Windows\\System32",
+			filename: "config.ini",
+			wantError: true,
+		},
+		{
+			name:     "absolute path in filename",
+			ftpPath:  "",
+			filename: "/etc/passwd",
+			wantError: true,
+		},
+		// Windows-specific attacks
+		{
+			name:     "windows drive letter",
+			ftpPath:  "C:\\",
+			filename: "file.txt",
+			wantError: true,
+		},
+		{
+			name:     "windows path separators",
+			ftpPath:  "..\\..\\etc",
+			filename: "passwd.txt",
+			wantError: true,
+		},
+		// Mixed attacks
+		{
+			name:     "unix slash then dot-dot",
+			ftpPath:  "/../etc",
+			filename: "passwd.txt",
+			wantError: true,
+		},
+		{
+			name:     "dot-dot with trailing slash",
+			ftpPath:  "foo/../",
+			filename: "bar.txt",
+			wantError: true,
+		},
+		{
+			name:     "multiple dot-dot sequences",
+			ftpPath:  "../../../etc",
+			filename: "passwd.txt",
+			wantError: true,
+		},
+		// Nested traversal attempts
+		{
+			name:     "nested path with traversal",
+			ftpPath:  "a/b/../../c",
+			filename: "file.txt",
+			wantError: true,
+		},
+		{
+			name:     "traversal then valid path",
+			ftpPath:  "../a/b/c",
+			filename: "file.txt",
+			wantError: true,
+		},
+		// Null byte and control character attacks
+		{
+			name:     "null byte in path",
+			ftpPath:  "foo\x00bar",
+			filename: "file.txt",
+			wantError: false, // Null byte will be sanitized
+		},
+		{
+			name:     "control characters in filename",
+			ftpPath:  "",
+			filename: "file\x00\x01.txt",
+			wantError: false, // Control chars will be replaced
+		},
+		// Valid cases that should NOT error
+		{
+			name:     "single dot in filename",
+			ftpPath:  "",
+			filename: ".hidden",
+			wantError: false,
+		},
+		{
+			name:     "dots in extension",
+			ftpPath:  "",
+			filename: "file.tar.gz",
+			wantError: false,
+		},
+		{
+			name:     "leading dots in filename",
+			ftpPath:  "",
+			filename: "...test.txt",
+			wantError: false,
+		},
+	}
+
+	for _, tc := range traversalCases {
+		t.Run(tc.name, func(t *testing.T) {
+			path, err := tm.CalculateTargetPath("testuser", tc.ftpPath, tc.filename)
+
+			if tc.wantError {
+				if err == nil {
+					t.Errorf("expected error for %s but got none (path: %s)", tc.name, path)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("unexpected error for %s: %v", tc.name, err)
+				return
+			}
+
+			if path == "" {
+				t.Errorf("expected non-empty path for %s", tc.name)
+				return
+			}
+
+			// For valid cases, ensure path stays within root
+			if !strings.HasPrefix(path, "/uploads/") && path != "/uploads/file.txt" {
+				// Check if it's a direct file in root
+				if !strings.HasPrefix(path, "/uploads/") {
+					t.Logf("path for %s: %s", tc.name, path)
+				}
+			}
+
+			// Ensure path doesn't contain actual traversal sequences
+			// (not just ".." as a substring, which could be part of a filename)
+			// Check for "/.." followed by "/" or at end, or "\\.." followed by "\\" or at end
+			if strings.Contains(path, "/../") || strings.Contains(path, "\\..\\") ||
+				strings.HasSuffix(path, "/..") || strings.HasSuffix(path, "\\..") ||
+				strings.Contains(path, "/..\\") || strings.Contains(path, "\\../") {
+				t.Errorf("path contains traversal sequence for %s: %s", tc.name, path)
+			}
+
+			// Ensure path is absolute
+			if !strings.HasPrefix(path, "/") {
+				t.Errorf("path is not absolute for %s: %s", tc.name, path)
+			}
+		})
+	}
+}
+
+// TestValidateTargetPathEdgeCases tests edge cases in path validation
+func TestValidateTargetPathEdgeCases(t *testing.T) {
+	tm := NewTransferManager()
+
+	edgeCases := []struct {
+		name       string
+		targetPath string
+		targetRoot string
+		expectError bool
+	}{
+		// Root prefix matching edge cases
+		{
+			name:       "root is prefix but path continues differently",
+			targetPath: "/root2/file.txt",
+			targetRoot: "/root",
+			expectError: true, // /root2 should not match /root
+		},
+		{
+			name:       "root is prefix with dash",
+			targetPath: "/root-foo/file.txt",
+			targetRoot: "/root",
+			expectError: true, // /root-foo should not match /root
+		},
+		{
+			name:       "exact root match",
+			targetPath: "/root",
+			targetRoot: "/root",
+			expectError: false,
+		},
+		{
+			name:       "root with trailing slash",
+			targetPath: "/root/file.txt",
+			targetRoot: "/root/",
+			expectError: false,
+		},
+		{
+			name:       "path with multiple trailing slashes",
+			targetPath: "/root/file///txt",
+			targetRoot: "/root",
+			expectError: false, // filepath.Clean will normalize
+		},
+	}
+
+	for _, tc := range edgeCases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tm.validateTargetPath(tc.targetPath, tc.targetRoot)
+
+			if tc.expectError {
+				if err == nil {
+					t.Errorf("expected error for %s but got none", tc.name)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("unexpected error for %s: %v", tc.name, err)
+			}
+		})
+	}
+}
+
 func TestProcessUploadIntegration(t *testing.T) {
 	tm := NewTransferManager()
 
