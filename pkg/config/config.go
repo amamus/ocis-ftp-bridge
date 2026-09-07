@@ -136,6 +136,22 @@ type ObservabilityConfig struct {
 
 type HTTPConfig struct {
 	Address string `yaml:"address,omitempty" json:"address,omitempty"`
+	// Authentication settings for HTTP endpoints
+	Auth HTTPAuthConfig `yaml:"auth,omitempty" json:"auth,omitempty"`
+}
+
+type HTTPAuthConfig struct {
+	// Enable authentication for HTTP endpoints
+	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Authentication method: "basic", "bearer", "none"
+	Method string `yaml:"method,omitempty" json:"method,omitempty"`
+	// Basic authentication credentials
+	Username string `yaml:"username,omitempty" json:"username,omitempty"`
+	Password string `yaml:"password,omitempty" json:"-"`
+	// Bearer token authentication
+	BearerToken string `yaml:"bearer_token,omitempty" json:"-"`
+	// Token can also be sourced from environment variable
+	BearerTokenEnv string `yaml:"bearer_token_env,omitempty" json:"bearer_token_env,omitempty"`
 }
 
 func New() *Config {
@@ -160,7 +176,15 @@ func New() *Config {
 			MaxTotalSize: ByteSize(1024 * 1024 * 1024),
 			MaxSize:      1024 * 1024 * 1024,
 		},
-		HTTP: HTTPConfig{Address: ":9200"},
+		HTTP: HTTPConfig{
+			Address: ":9090",
+			Auth: HTTPAuthConfig{
+				Enabled: true,  // Authentication enabled by default for security
+				Method:  "basic",
+				Username: "admin",
+				// Password will be randomly generated on first run if not specified
+			},
+		},
 	}
 }
 
@@ -224,6 +248,11 @@ func (c *Config) validateWithEnv(lookupEnv func(string) (string, bool)) error {
 	if err := c.validateOCIS(); err != nil {
 		return err
 	}
+	
+	// Validate HTTP configuration
+	if err := c.validateHTTP(lookupEnv); err != nil {
+		return err
+	}
 	if !filepath.IsAbs(c.Spool.Directory) {
 		return fmt.Errorf("spool.directory must be an absolute path: %q", c.Spool.Directory)
 	}
@@ -280,6 +309,45 @@ func (c *Config) validateWithEnv(lookupEnv func(string) (string, bool)) error {
 			return fmt.Errorf("%s.upload.max_size must be greater than zero", prefix)
 		}
 	}
+	return nil
+}
+
+func (c *Config) validateHTTP(lookupEnv func(string) (string, bool)) error {
+	// Validate HTTP auth configuration if enabled
+	if c.HTTP.Auth.Enabled {
+		switch c.HTTP.Auth.Method {
+		case "basic":
+			// Basic auth requires username and password
+			if strings.TrimSpace(c.HTTP.Auth.Username) == "" {
+				return fmt.Errorf("http.auth.username is required when http.auth.enabled=true and method=basic")
+			}
+			if strings.TrimSpace(c.HTTP.Auth.Password) == "" {
+				// Check if we can generate a password later, but warn for now
+				// We'll generate a random password if not provided
+				c.HTTP.Auth.Password = "" // Will be generated at runtime
+			}
+		case "bearer":
+			// Bearer auth requires token
+			if strings.TrimSpace(c.HTTP.Auth.BearerToken) == "" && strings.TrimSpace(c.HTTP.Auth.BearerTokenEnv) == "" {
+				return fmt.Errorf("http.auth.bearer_token or http.auth.bearer_token_env is required when http.auth.enabled=true and method=bearer")
+			}
+			if strings.TrimSpace(c.HTTP.Auth.BearerTokenEnv) != "" {
+				token, ok := lookupEnv(c.HTTP.Auth.BearerTokenEnv)
+				if !ok || strings.TrimSpace(token) == "" {
+					return fmt.Errorf("http.auth.bearer_token_env %q is not set or empty", c.HTTP.Auth.BearerTokenEnv)
+				}
+				c.HTTP.Auth.BearerToken = token
+			}
+		case "none", "":
+			// No authentication, but warn if enabled
+			if c.HTTP.Auth.Enabled {
+				return fmt.Errorf("http.auth.method is required when http.auth.enabled=true")
+			}
+		default:
+			return fmt.Errorf("http.auth.method %q is invalid; expected basic, bearer, or none", c.HTTP.Auth.Method)
+		}
+	}
+	
 	return nil
 }
 

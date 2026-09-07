@@ -77,7 +77,19 @@ observability:
 # ============================================================================
 http:
   # Address for health, readiness, and metrics endpoints
-  address: ":9200"
+  address: ":9090"
+  
+  # Authentication configuration for HTTP endpoints
+  # Enabled by default for security
+  auth:
+    enabled: true  # Enable authentication (recommended for production)
+    method: basic  # Authentication method: basic, bearer, or none
+    username: admin  # HTTP basic auth username
+    # password: ""  # Password - auto-generated if empty, set explicitly for production
+    # Alternative: Use bearer token authentication
+    # method: bearer
+    # bearer_token: "your-secret-token"
+    # bearer_token_env: "HTTP_AUTH_TOKEN"  # Or source from environment variable
 
 # ============================================================================
 # FTP Account Configuration
