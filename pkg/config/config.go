@@ -130,8 +130,22 @@ type UploadConfig struct {
 	MaxSize         ByteSize `yaml:"max_size" json:"max_size"`
 }
 
+// LoggerConfig contains configuration for the logger
+type LoggerConfig struct {
+	// Level is the minimum log level to output
+	Level string `yaml:"level,omitempty" json:"level,omitempty"`
+	// Format is the output format: "text" or "json"
+	Format string `yaml:"format,omitempty" json:"format,omitempty"`
+	// Output is the output destination: "stdout", "stderr", or a file path
+	Output string `yaml:"output,omitempty" json:"output,omitempty"`
+	// AddSource adds source file and line to log records
+	AddSource bool `yaml:"add_source,omitempty" json:"add_source,omitempty"`
+}
+
+// ObservabilityConfig contains configuration for observability
 type ObservabilityConfig struct {
-	Debug bool `yaml:"debug,omitempty" json:"debug,omitempty"`
+	Debug  bool        `yaml:"debug,omitempty" json:"debug,omitempty"`
+	Logger LoggerConfig `yaml:"logger,omitempty" json:"logger,omitempty"`
 }
 
 type HTTPConfig struct {

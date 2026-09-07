@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,20 +123,28 @@ func (d *BridgeDriver) AuthUser(cc ftpserver.ClientContext, user, password strin
 	// Authenticate user
 	account, err := d.authenticateUser(user, password)
 	if err != nil {
-		d.obs.Log("info", fmt.Sprintf("FTP authentication failed for user %s: %v", user, err))
+		d.obs.Error("FTP authentication failed",
+			slog.String("user", user),
+			slog.String("error", err.Error()),
+		)
 		return nil, ErrInvalidCredentials
 	}
 
 	// Check if account has required oCIS configuration
 	if account.OCIS.Username == "" || account.AppToken == "" {
-		d.obs.Log("warn", fmt.Sprintf("FTP account missing oCIS configuration for user %s", user))
+		d.obs.Warn("FTP account missing oCIS configuration",
+			slog.String("user", user),
+		)
 		return nil, ErrInvalidCredentials
 	}
 
 	// Resolve the drive for this account
 	resolvedDrive, err := d.resolveDriveForAccount(account)
 	if err != nil {
-		d.obs.Log("warn", fmt.Sprintf("Failed to resolve drive for account %s: %v", user, err))
+		d.obs.Error("Failed to resolve drive for account",
+			slog.String("user", user),
+			slog.String("error", err.Error()),
+		)
 		return nil, fmt.Errorf("drive resolution failed: %w", err)
 	}
 
@@ -167,7 +176,10 @@ func (d *BridgeDriver) AuthUser(cc ftpserver.ClientContext, user, password strin
 	// Increment connection counter
 	atomic.AddInt64(&d.activeConnections, 1)
 
-	d.obs.Log("info", fmt.Sprintf("FTP authentication successful for user %s (oCIS: %s)", user, account.OCIS.Username))
+	d.obs.Info("FTP authentication successful",
+		slog.String("user", user),
+		slog.String("ocis_user", account.OCIS.Username),
+	)
 
 	return clientDriver, nil
 }
@@ -175,7 +187,10 @@ func (d *BridgeDriver) AuthUser(cc ftpserver.ClientContext, user, password strin
 // OnLogin is called after successful authentication.
 func (d *BridgeDriver) OnLogin(client ftpserver.ClientContext) error {
 	// Update the remote address in logs
-	d.obs.Log("info", fmt.Sprintf("FTP client logged in from %s (ID: %d)", client.RemoteAddr().String(), client.ID()))
+	d.obs.Info("FTP client logged in",
+		slog.String("remote_addr", client.RemoteAddr().String()),
+		slog.Uint64("connection_id", uint64(client.ID())),
+	)
 	return nil
 }
 
@@ -184,7 +199,10 @@ func (d *BridgeDriver) OnLogout(client ftpserver.ClientContext) error {
 	// Decrement connection counter
 	atomic.AddInt64(&d.activeConnections, -1)
 
-	d.obs.Log("info", fmt.Sprintf("FTP client logged out (ID: %d, addr: %s)", client.ID(), client.RemoteAddr().String()))
+	d.obs.Info("FTP client logged out",
+		slog.Uint64("connection_id", uint64(client.ID())),
+		slog.String("remote_addr", client.RemoteAddr().String()),
+	)
 	return nil
 }
 
@@ -247,7 +265,10 @@ func (d *BridgeDriver) ClientDisconnected(cc ftpserver.ClientContext) {
 	// Decrement connection counter
 	atomic.AddInt64(&d.activeConnections, -1)
 
-	d.obs.Log("info", fmt.Sprintf("FTP client disconnected (ID: %d, addr: %s)", cc.ID(), cc.RemoteAddr().String()))
+	d.obs.Info("FTP client disconnected",
+		slog.Uint64("connection_id", uint64(cc.ID())),
+		slog.String("remote_addr", cc.RemoteAddr().String()),
+	)
 }
 
 // Shutdown initiates server shutdown.
@@ -261,7 +282,7 @@ func (d *BridgeDriver) Shutdown() {
 		d.shutdown = true
 	}
 
-	d.obs.Log("info", "FTP server shutting down")
+	d.obs.Info("FTP server shutting down")
 }
 
 // IsShuttingDown returns true if the server is shutting down.
