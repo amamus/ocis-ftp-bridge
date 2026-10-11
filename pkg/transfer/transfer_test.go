@@ -968,6 +968,44 @@ func TestProcessUploadIntegration(t *testing.T) {
 	})
 }
 
+// TestSanitizeFilenameUnicodeLength verifies that filename length is measured
+// in characters (runes), not bytes, so multi-byte UTF-8 filenames are not
+// incorrectly rejected.
+func TestSanitizeFilenameUnicodeLength(t *testing.T) {
+	tm := NewTransferManager()
+
+	t.Run("accepts multi-byte filename under 255 characters", func(t *testing.T) {
+		// 100 CJK characters, each 3 bytes in UTF-8 = 300 bytes total
+		// but only 100 runes, well under the 255-character limit
+		filename := strings.Repeat("漢", 100) + ".txt"
+		safeName, err := tm.sanitizeFilename(filename)
+		if err != nil {
+			t.Errorf("expected no error for 100-character CJK filename, got: %v", err)
+		}
+		if safeName != filename {
+			t.Errorf("expected filename to be preserved, got %q", safeName)
+		}
+	})
+
+	t.Run("rejects filename over 255 characters", func(t *testing.T) {
+		// 256 ASCII characters = 256 bytes = 256 runes, over the limit
+		filename := strings.Repeat("a", 256)
+		_, err := tm.sanitizeFilename(filename)
+		if err == nil {
+			t.Errorf("expected error for 256-character filename")
+		}
+	})
+
+	t.Run("rejects multi-byte filename over 255 runes", func(t *testing.T) {
+		// 256 CJK characters = 768 bytes, 256 runes - over the character limit
+		filename := strings.Repeat("漢", 256)
+		_, err := tm.sanitizeFilename(filename)
+		if err == nil {
+			t.Errorf("expected error for 256-rune CJK filename")
+		}
+	})
+}
+
 // Ensure strings.HasSuffix is available
 func hasSuffix(s, suffix string) bool {
 	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix

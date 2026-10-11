@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/amamus/ocis-ftp-bridge/pkg/webdav"
 )
@@ -309,10 +310,13 @@ func (tm *TransferManager) sanitizeFilename(filename string) (string, error) {
 		return "unnamed", nil
 	}
 
-	// Check length limits to prevent denial of service
+	// Check length limits to prevent denial of service.
+	// Count runes (characters), not bytes, so multi-byte UTF-8 filenames
+	// are not incorrectly rejected.
 	const maxFilenameLength = 255
-	if len(result) > maxFilenameLength {
-		return "", fmt.Errorf("filename too long: %d characters (max %d)", len(result), maxFilenameLength)
+	runeCount := utf8.RuneCountInString(result)
+	if runeCount > maxFilenameLength {
+		return "", fmt.Errorf("filename too long: %d characters (max %d)", runeCount, maxFilenameLength)
 	}
 
 	return result, nil
