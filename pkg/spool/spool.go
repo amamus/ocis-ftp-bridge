@@ -17,6 +17,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/amamus/ocis-ftp-bridge/pkg/errors"
 )
 
 // FileStatus represents the status of a spooled file.
@@ -33,19 +35,19 @@ const (
 	FileStatusPublished FileStatus = "published"
 )
 
-// Errors
+// Errors - now using the structured error framework
 var (
-	ErrInvalidSpoolDirectory  = fmt.Errorf("invalid spool directory")
-	ErrInvalidParameters      = fmt.Errorf("invalid parameters")
-	ErrEmptyData              = fmt.Errorf("empty data")
-	ErrFileTooLarge           = fmt.Errorf("file too large")
-	ErrPathTraversal          = fmt.Errorf("path traversal")
-	ErrNotImplemented         = fmt.Errorf("operation not implemented")
-	ErrUploadCancelled        = fmt.Errorf("upload cancelled")
-	ErrUploadIncomplete       = fmt.Errorf("upload incomplete")
-	ErrSpoolCapacityExceeded = fmt.Errorf("spool capacity exceeded")
-	ErrFileNotFound           = fmt.Errorf("file not found")
-	ErrDuplicateFile          = fmt.Errorf("duplicate file")
+	ErrInvalidSpoolDirectory  = errors.InvalidInput("invalid spool directory", nil)
+	ErrInvalidParameters      = errors.InvalidInput("invalid parameters", nil)
+	ErrEmptyData              = errors.InvalidInput("empty data", nil)
+	ErrFileTooLarge           = errors.InvalidInput("file too large", nil)
+	ErrPathTraversal          = errors.PathTraversal("path traversal in spool")
+	ErrNotImplemented         = errors.InternalError("operation not implemented", nil)
+	ErrUploadCancelled        = errors.InternalError("upload cancelled", nil)
+	ErrUploadIncomplete       = errors.InvalidInput("upload incomplete", nil)
+	ErrSpoolCapacityExceeded = errors.StorageFull("spool capacity exceeded")
+	ErrFileNotFound           = errors.NotFound("file", "unknown")
+	ErrDuplicateFile          = errors.AlreadyExists("file", "unknown")
 )
 
 // FileRef represents a reference to a spooled file.
