@@ -151,9 +151,6 @@ jobs:
       - name: Validate SPDX format
         run: |
           echo "Validating SPDX SBOM..."
-          # Install spdx-tools for validation
-          go install github.com/spdx/tools-golang/cmd/spdx-sbom@latest
-          
           # Basic validation - check that file is valid JSON and has expected fields
           if jq -e '.documentNamespace, .packages, .relationships' sbom.spdx.json > /dev/null 2>&1; then
             echo "✅ SPDX SBOM is valid"

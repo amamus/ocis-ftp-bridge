@@ -36,6 +36,8 @@ CONTRIBUTING.md
 # Example configuration files
 *.example
 *.sample
+# ...but ship the canonical example config in the image as a template
+!config.yaml.example
 
 # Logs
 *.log

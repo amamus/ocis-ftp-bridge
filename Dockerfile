@@ -67,7 +67,7 @@ RUN mkdir -p /app/bin /app/config /app/spool /app/logs && \
 COPY --from=builder /build/${BINARY_NAME} /app/bin/${BINARY_NAME}
 
 # Copy default configuration (optional - can be mounted at runtime)
-COPY --from=builder /build/config.yaml /app/config/config.yaml.default
+COPY --from=builder /build/config.yaml.example /app/config/config.yaml.default
 
 # Set working directory
 WORKDIR /app
