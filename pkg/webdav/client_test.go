@@ -165,8 +165,9 @@ func TestWebDAVClient_WithMockServer(t *testing.T) {
 	assert.Equal(t, ErrUploadConflict, err)
 
 	// Test Upload - with overwrite protection, file exists (should succeed)
+	// The mock accepts a plain PUT without If-None-Match, so the upload succeeds.
 	err = client.Upload(ctx, "/upload.txt", []byte("test content"), true)
-	require.Error(t, err) // This will still fail because our mock doesn't handle overwrite case
+	require.NoError(t, err)
 
 	// Test DeleteFile - existing file
 	err = client.DeleteFile(ctx, "/testfile.txt")

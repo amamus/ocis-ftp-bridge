@@ -91,7 +91,7 @@ func (c *webdavClient) Upload(ctx context.Context, path string, data []byte, ove
 		return ErrInvalidPath
 	}
 
-	if data == nil {
+	if len(data) == 0 {
 		return ErrEmptyData
 	}
 
