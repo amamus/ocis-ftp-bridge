@@ -54,7 +54,7 @@ jobs:
       - name: Scan SBOM for vulnerabilities
         run: |
           echo "Scanning with Grype..."
-          grype sbom:spdx.json -o json -q > vulnerabilities.json || true
+          grype sbom:sbom.spdx.json -o json -q > vulnerabilities.json || true
           
           echo "Vulnerability scan completed:"
           if [ -f vulnerabilities.json ]; then

@@ -46,7 +46,7 @@ case "$FORMAT" in
         syft dir:. -o cyclonedx-json="$OUTPUT_DIR/sbom.cyclonedx.json" --exclude "**/vendor/**" --exclude "**/test/**" --exclude ".git/**"
         
         echo "Scanning for vulnerabilities..."
-        grype sbom:sbom.spdx.json -o json -q > "$OUTPUT_DIR/vulnerabilities.json" 2>/dev/null || echo "Vulnerability scan completed (no critical issues found)"
+        grype sbom:"$OUTPUT_DIR/sbom.spdx.json" -o json -q > "$OUTPUT_DIR/vulnerabilities.json" 2>/dev/null || echo "Vulnerability scan completed (no critical issues found)"
         ;;
     *)
         echo "Unknown format: $FORMAT"
