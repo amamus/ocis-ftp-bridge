@@ -46,8 +46,8 @@ jobs:
 
       - name: Generate SBOMs for dependencies
         run: |
-          echo "Generating SPDX SBOM..."
-          syft dir:. -o spdx-json=sbom.spdx.json --exclude "**/vendor/**" --exclude "**/test/**" --exclude "**/.git/**"
+          echo "Generating SPDX 3.0.1 SBOM..."
+          syft dir:. -o spdx-json@3.0=sbom.spdx.json --exclude "**/vendor/**" --exclude "**/test/**" --exclude "**/.git/**"
           
           echo "Generating CycloneDX SBOM..."
           syft dir:. -o cyclonedx-json=sbom.cyclonedx.json --exclude "**/vendor/**" --exclude "**/test/**" --exclude "**/.git/**"
@@ -118,7 +118,7 @@ jobs:
       - name: Generate SBOM for Docker image
         run: |
           echo "Generating Docker image SBOM..."
-          syft ocis-ftp-bridge:sbom -o spdx-json=docker-sbom.spdx.json
+          syft ocis-ftp-bridge:sbom -o spdx-json@3.0=docker-sbom.spdx.json
           syft ocis-ftp-bridge:sbom -o cyclonedx-json=docker-sbom.cyclonedx.json
           
           echo "Docker SBOM files generated:"
@@ -148,14 +148,42 @@ jobs:
         with:
           name: sbom
 
-      - name: Validate SPDX format
+      - name: Validate SPDX 3.0.1 format
         run: |
-          echo "Validating SPDX SBOM..."
-          # Basic validation - check that file is valid JSON and has expected fields
-          if jq -e '.documentNamespace, .packages, .relationships' sbom.spdx.json > /dev/null 2>&1; then
-            echo "✅ SPDX SBOM is valid"
+          echo "Validating SPDX 3.0.1 SBOM..."
+          # SPDX 3.0.1 is a JSON-LD document: an @context plus an @graph of
+          # typed elements (CreationInfo, SpdxDocument, software_Package,
+          # Relationship, ...).
+          if jq -e '
+            (."@context" == "https://spdx.org/rdf/3.0.1/spdx-context.jsonld") and
+            (."@graph" | type == "array") and
+            ([."@graph"[] | select(.type == "CreationInfo" and .specVersion == "3.0.1")] | length == 1) and
+            ([."@graph"[] | select(.type == "SpdxDocument")] | length >= 1) and
+            ([."@graph"[] | select(.type == "software_Package")] | length > 0) and
+            ([."@graph"[] | select(.type == "Relationship")] | length > 0)
+          ' sbom.spdx.json > /dev/null 2>&1; then
+            echo "SPDX 3.0.1 SBOM is valid"
           else
-            echo "❌ SPDX SBOM validation failed"
+            echo "SPDX 3.0.1 SBOM validation failed"
+            exit 1
+          fi
+
+      - name: Validate REUSE compatibility of SBOM files
+        run: |
+          echo "Validating REUSE compatibility of SBOM files..."
+          pip install --quiet --break-system-packages reuse
+          # Lint an isolated project containing only the SBOM files and the
+          # REUSE configuration: the SPDX SBOM is recognised as an SPDX
+          # document and excluded per REUSE Specification 3.3, while the
+          # CycloneDX SBOM is covered by the REUSE.toml annotation.
+          tmpdir=$(mktemp -d)
+          cp sbom.spdx.json sbom.cyclonedx.json REUSE.toml "$tmpdir/"
+          mkdir -p "$tmpdir/LICENSES"
+          cp LICENSES/Apache-2.0.txt "$tmpdir/LICENSES/"
+          if (cd "$tmpdir" && reuse lint); then
+            echo "SBOM files are REUSE compatible"
+          else
+            echo "SBOM files are not REUSE compatible"
             exit 1
           fi
 
@@ -173,8 +201,8 @@ jobs:
       - name: Check for known vulnerable packages
         run: |
           echo "Checking SBOM for vulnerable packages..."
-          # Count packages in SBOM
-          spdx_package_count=$(jq '.packages | length' sbom.spdx.json)
+          # Count packages in SBOM (SPDX 3.0.1 keeps packages in @graph)
+          spdx_package_count=$(jq '[."@graph"[] | select(.type == "software_Package")] | length' sbom.spdx.json)
           cyclonedx_package_count=$(jq '.components | length' sbom.cyclonedx.json)
           
           echo "SPDX packages: $spdx_package_count"

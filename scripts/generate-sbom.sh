@@ -31,16 +31,16 @@ cd "$PROJECT_DIR"
 
 case "$FORMAT" in
     spdx)
-        echo "Generating SPDX SBOM..."
-        syft dir:. -o spdx-json="$OUTPUT_DIR/sbom.spdx.json" --exclude "**/vendor/**" --exclude "**/test/**" --exclude "**/.git/**"
+        echo "Generating SPDX 3.0.1 SBOM..."
+        syft dir:. -o spdx-json@3.0="$OUTPUT_DIR/sbom.spdx.json" --exclude "**/vendor/**" --exclude "**/test/**" --exclude "**/.git/**"
         ;;
     cyclonedx)
         echo "Generating CycloneDX SBOM..."
         syft dir:. -o cyclonedx-json="$OUTPUT_DIR/sbom.cyclonedx.json" --exclude "**/vendor/**" --exclude "**/test/**" --exclude "**/.git/**"
         ;;
     all)
-        echo "Generating SPDX SBOM..."
-        syft dir:. -o spdx-json="$OUTPUT_DIR/sbom.spdx.json" --exclude "**/vendor/**" --exclude "**/test/**" --exclude "**/.git/**"
+        echo "Generating SPDX 3.0.1 SBOM..."
+        syft dir:. -o spdx-json@3.0="$OUTPUT_DIR/sbom.spdx.json" --exclude "**/vendor/**" --exclude "**/test/**" --exclude "**/.git/**"
         
         echo "Generating CycloneDX SBOM..."
         syft dir:. -o cyclonedx-json="$OUTPUT_DIR/sbom.cyclonedx.json" --exclude "**/vendor/**" --exclude "**/test/**" --exclude "**/.git/**"

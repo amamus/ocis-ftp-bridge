@@ -810,10 +810,16 @@ The ocis-ftp-bridge generates comprehensive Software Bill of Materials (SBOM) to
 
 The project generates SBOMs in two industry-standard formats:
 
-1. **SPDX 2.3** (ISO/IEC 5962:2021) - `sbom.spdx.json`
-2. **CycloneDX 1.4** - `sbom.cyclonedx.json`
+1. **SPDX 3.0.1** (JSON-LD) - `sbom.spdx.json`
+2. **CycloneDX 1.7** - `sbom.cyclonedx.json`
 
 Both formats are widely supported by security tools, compliance frameworks, and vulnerability scanners.
+
+The SBOM files are [REUSE](https://reuse.software) compatible: the SPDX SBOM is a
+valid SPDX document and is recognised as such by the REUSE tool (REUSE
+Specification 3.3 excludes SPDX documents from linting), while the CycloneDX
+SBOM carries copyright and license information via the `REUSE.toml` annotation
+and the `LICENSES/Apache-2.0.txt` license file.
 
 ### SBOM Contents
 
@@ -844,8 +850,8 @@ You can manually generate SBOMs using Syft:
 # Install Syft
 curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
 
-# Generate SPDX SBOM
-syft dir:. -o spdx-json=sbom.spdx.json
+# Generate SPDX 3.0.1 SBOM
+syft dir:. -o spdx-json@3.0=sbom.spdx.json
 
 # Generate CycloneDX SBOM  
 syft dir:. -o cyclonedx-json=sbom.cyclonedx.json
@@ -860,7 +866,7 @@ To generate an SBOM for the Docker image:
 docker build -t ocis-ftp-bridge .
 
 # Generate SBOM for the image
-syft ocis-ftp-bridge -o spdx-json=docker-sbom.spdx.json
+syft ocis-ftp-bridge -o spdx-json@3.0=docker-sbom.spdx.json
 syft ocis-ftp-bridge -o cyclonedx-json=docker-sbom.cyclonedx.json
 ```
 
@@ -879,10 +885,13 @@ syft ocis-ftp-bridge -o cyclonedx-json=docker-sbom.cyclonedx.json
 ### SBOM Validation
 
 The CI pipeline validates that:
-- SBOM files are valid JSON
-- Required fields are present (packages, components, relationships)
-- License information is included
-- External references (PURLs) are generated
+- The SPDX SBOM is a valid SPDX 3.0.1 JSON-LD document (`@context`, `@graph`,
+  `CreationInfo` with `specVersion: 3.0.1`, packages and relationships)
+- The CycloneDX SBOM contains components and dependencies
+- SBOM files are valid JSON with license information and PURLs
+- The SBOM files are REUSE compatible (`reuse lint` on the SBOM file set:
+  the SPDX SBOM is recognised as an SPDX document, the CycloneDX SBOM is
+  covered by `REUSE.toml`)
 
 ### Vulnerability Scanning
 

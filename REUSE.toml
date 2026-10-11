@@ -1,0 +1,10 @@
+version = 1
+
+# The SPDX SBOM (sbom.spdx.json) is recognised by the REUSE tool as an SPDX
+# document and is excluded from linting per REUSE Specification 3.3.
+# The CycloneDX SBOM is not an SPDX document, so it is annotated here.
+[[annotations]]
+path = "sbom.cyclonedx.json"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 ocis-ftp-bridge contributors"
+SPDX-License-Identifier = "Apache-2.0"
