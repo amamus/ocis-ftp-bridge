@@ -143,10 +143,12 @@ func (s *OperationsServer) checkWebDAVConnectivity() error {
 	}
 	defer resp.Body.Close()
 	
-	// WebDAV may return 401 (Unauthorized) which is still a successful connection
-	// We want to check if we can reach the server, not necessarily if we're authenticated
-	if resp.StatusCode != http.StatusOK && 
-	   resp.StatusCode != http.StatusUnauthorized && 
+	// WebDAV may return 401 (Unauthorized) which is still a successful connection.
+	// A successful PROPFIND returns 207 Multi-Status.
+	// We want to check if we can reach the server, not necessarily if we're authenticated.
+	if resp.StatusCode != http.StatusOK &&
+	   resp.StatusCode != http.StatusMultiStatus &&
+	   resp.StatusCode != http.StatusUnauthorized &&
 	   resp.StatusCode != http.StatusForbidden {
 		return fmt.Errorf("WebDAV returned unexpected status: %s", resp.Status)
 	}
@@ -423,6 +425,14 @@ func NewOperationsServer(address string, healthConfig HealthCheckConfig) *Operat
 
 	// Readiness endpoint
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		// Honor explicitly disabled readiness state (SetReady(false))
+		if atomic.LoadInt32(&s.ready) == 0 {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte("Service is not ready to accept traffic"))
+			return
+		}
+
 		// Perform actual health checks
 		checks, failedChecks := s.performHealthChecks()
 		
