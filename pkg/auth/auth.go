@@ -2,13 +2,14 @@
 package auth
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/amamus/ocis-ftp-bridge/pkg/config"
+	"github.com/amamus/ocis-ftp-bridge/pkg/errors"
 )
 
-var ErrInvalidCredentials = errors.New("invalid FTP credentials")
+// Deprecated: Use errors.Unauthorized() instead
+var ErrInvalidCredentials = errors.Unauthorized("invalid FTP credentials")
 
 type AccountMapping struct {
 	FTPUsername     string

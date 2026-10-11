@@ -2,7 +2,12 @@
 package config
 
 import (
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/rsa"
 	"crypto/subtle"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -14,6 +19,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/argon2"
 	"gopkg.in/yaml.v3"
@@ -79,6 +85,8 @@ type ServerConfig struct {
 	Passive       PassiveConfig `yaml:"passive" json:"passive"`
 	TLS           TLSConfig     `yaml:"tls" json:"tls"`
 	MaxConnections int         `yaml:"max_connections,omitempty" json:"max_connections,omitempty"`
+	// Rate limiting configuration
+	RateLimiting RateLimitConfig `yaml:"rate_limiting,omitempty" json:"rate_limiting,omitempty"`
 }
 
 type PassiveConfig struct {
@@ -93,6 +101,23 @@ type TLSConfig struct {
 	Key     string `yaml:"key,omitempty" json:"key,omitempty"`
 }
 
+// RateLimitConfig defines rate limiting settings for FTP server
+type RateLimitConfig struct {
+	// Per-IP connection rate limiting
+	MaxConnectionsPerIP int `yaml:"max_connections_per_ip,omitempty" json:"max_connections_per_ip,omitempty"`
+	
+	// Global connection limiting (overrides per-IP if lower)
+	MaxGlobalConnections int `yaml:"max_global_connections,omitempty" json:"max_global_connections,omitempty"`
+	
+	// Authentication attempt rate limiting
+	MaxAuthAttemptsPerIP int `yaml:"max_auth_attempts_per_ip,omitempty" json:"max_auth_attempts_per_ip,omitempty"`
+	AuthAttemptWindow time.Duration `yaml:"auth_attempt_window,omitempty" json:"auth_attempt_window,omitempty"`
+	AuthLockoutDuration time.Duration `yaml:"auth_lockout_duration,omitempty" json:"auth_lockout_duration,omitempty"`
+	
+	// IP lockout tracking
+	TrackFailedAttempts bool `yaml:"track_failed_attempts,omitempty" json:"track_failed_attempts,omitempty"`
+}
+
 type OCISConfig struct {
 	URL       string `yaml:"url" json:"url"`
 	GraphURL  string `yaml:"graph_url,omitempty" json:"graph_url,omitempty"`
@@ -103,6 +128,20 @@ type SpoolConfig struct {
 	Directory    string   `yaml:"directory" json:"directory"`
 	MaxTotalSize ByteSize `yaml:"max_total_size" json:"max_total_size"`
 	MaxSize      uint64   `yaml:"-" json:"-"`
+	// Monitoring configuration
+	Monitoring MonitoringConfig `yaml:"monitoring" json:"monitoring"`
+}
+
+// MonitoringConfig contains spool monitoring settings
+type MonitoringConfig struct {
+	// Enabled enables spool monitoring (default: true)
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// WarningThreshold is the percentage usage at which to log warnings (default: 80%)
+	WarningThreshold float64 `yaml:"warning_threshold" json:"warning_threshold"`
+	// CriticalThreshold is the percentage usage at which to log critical alerts (default: 95%)
+	CriticalThreshold float64 `yaml:"critical_threshold" json:"critical_threshold"`
+	// CheckInterval is how often to check spool usage (default: 30s)
+	CheckInterval time.Duration `yaml:"check_interval" json:"check_interval"`
 }
 
 type AccountConfig struct {
@@ -130,12 +169,42 @@ type UploadConfig struct {
 	MaxSize         ByteSize `yaml:"max_size" json:"max_size"`
 }
 
+// LoggerConfig contains configuration for the logger
+type LoggerConfig struct {
+	// Level is the minimum log level to output
+	Level string `yaml:"level,omitempty" json:"level,omitempty"`
+	// Format is the output format: "text" or "json"
+	Format string `yaml:"format,omitempty" json:"format,omitempty"`
+	// Output is the output destination: "stdout", "stderr", or a file path
+	Output string `yaml:"output,omitempty" json:"output,omitempty"`
+	// AddSource adds source file and line to log records
+	AddSource bool `yaml:"add_source,omitempty" json:"add_source,omitempty"`
+}
+
+// ObservabilityConfig contains configuration for observability
 type ObservabilityConfig struct {
-	Debug bool `yaml:"debug,omitempty" json:"debug,omitempty"`
+	Debug  bool        `yaml:"debug,omitempty" json:"debug,omitempty"`
+	Logger LoggerConfig `yaml:"logger,omitempty" json:"logger,omitempty"`
 }
 
 type HTTPConfig struct {
 	Address string `yaml:"address,omitempty" json:"address,omitempty"`
+	// Authentication settings for HTTP endpoints
+	Auth HTTPAuthConfig `yaml:"auth,omitempty" json:"auth,omitempty"`
+}
+
+type HTTPAuthConfig struct {
+	// Enable authentication for HTTP endpoints
+	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Authentication method: "basic", "bearer", "none"
+	Method string `yaml:"method,omitempty" json:"method,omitempty"`
+	// Basic authentication credentials
+	Username string `yaml:"username,omitempty" json:"username,omitempty"`
+	Password string `yaml:"password,omitempty" json:"-"`
+	// Bearer token authentication
+	BearerToken string `yaml:"bearer_token,omitempty" json:"-"`
+	// Token can also be sourced from environment variable
+	BearerTokenEnv string `yaml:"bearer_token_env,omitempty" json:"bearer_token_env,omitempty"`
 }
 
 func New() *Config {
@@ -144,10 +213,20 @@ func New() *Config {
 			Listen:          ":2121",
 			Passive:         PassiveConfig{MinPort: 40000, MaxPort: 50000},
 			MaxConnections:  100,
-			// TLS is disabled by default for development convenience
-			// Production deployments should enable TLS explicitly
+			// TLS is enabled by default for security
+			// Plain FTP (unencrypted) is insecure and should be avoided
 			TLS: TLSConfig{
-				Enabled: false,
+				Enabled: true,  // TLS is enabled by default for security
+				Cert:    "", // Will be validated at startup if enabled
+				Key:     "", // Will be validated at startup if enabled
+			},
+			RateLimiting: RateLimitConfig{
+				MaxConnectionsPerIP:   10,    // Max 10 connections per IP
+				MaxGlobalConnections:  100,   // Max 100 total connections
+				MaxAuthAttemptsPerIP:  5,     // Max 5 auth attempts per IP per window
+				AuthAttemptWindow:     time.Minute, // 1 minute window for auth attempts
+				AuthLockoutDuration:   5 * time.Minute, // 5 minute lockout after max attempts
+				TrackFailedAttempts:   true,   // Track failed auth attempts for rate limiting
 			},
 		},
 		OCIS: OCISConfig{
@@ -159,9 +238,98 @@ func New() *Config {
 			Directory:    "/var/tmp/ocis-ftp-bridge-spool",
 			MaxTotalSize: ByteSize(1024 * 1024 * 1024),
 			MaxSize:      1024 * 1024 * 1024,
+			Monitoring: MonitoringConfig{
+				Enabled:           true,
+				WarningThreshold:  80.0,  // Warn at 80% usage
+				CriticalThreshold: 95.0,  // Alert at 95% usage
+				CheckInterval:     30 * time.Second, // Check every 30 seconds
+			},
 		},
-		HTTP: HTTPConfig{Address: ":9200"},
+		HTTP: HTTPConfig{
+			Address: ":9090",
+			Auth: HTTPAuthConfig{
+				Enabled: true,  // Authentication enabled by default for security
+				Method:  "basic",
+				Username: "admin",
+				// Password will be randomly generated on first run if not specified
+			},
+		},
 	}
+}
+
+// checkForPlaintextCredentials scans the config file for potential plaintext credentials
+// This is a best-effort check to warn users about potential security issues
+func checkForPlaintextCredentials(filename string) error {
+	// Read the raw file content
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return nil // Can't read, skip check
+	}
+	
+	content := string(data)
+	
+	// Check for common patterns that might indicate plaintext passwords
+	// These are heuristic checks and may have false positives
+	passwordPatterns := []string{
+		"password:",
+		"password: ",
+		"passwd:",
+		"passwd: ",
+		"secret:",
+		"secret: ",
+		"token:",
+		"token: ",
+	}
+	
+	// Check for plaintext passwords that look like common passwords
+	// These are weak checks but can catch obvious issues
+	commonPasswords := []string{
+		"password",
+		"123456",
+		"qwerty",
+		"admin",
+		"letmein",
+		"welcome",
+		"secret",
+		"changeme",
+	}
+	
+	for _, pattern := range passwordPatterns {
+		if strings.Contains(content, pattern) {
+			// Check if it's followed by what looks like a plaintext password
+			lines := strings.Split(content, "\n")
+			for _, line := range lines {
+				if strings.Contains(line, pattern) {
+					// Extract the value after the pattern
+					parts := strings.SplitN(line, ":", 2)
+					if len(parts) > 1 {
+						value := strings.TrimSpace(parts[1])
+						// Skip if it looks like a hash (starts with $)
+						if strings.HasPrefix(value, "$") {
+							continue
+						}
+						// Skip if it's empty or in quotes (might be a reference)
+						if value == "" || strings.HasPrefix(value, "\"") || strings.HasPrefix(value, "'") {
+							continue
+						}
+						// Check if it matches a common password
+						for _, commonPW := range commonPasswords {
+							if strings.EqualFold(value, commonPW) {
+								return fmt.Errorf("potential plaintext password detected: %s", pattern)
+							}
+						}
+						// Check if it looks like a base64 token (common for oCIS tokens)
+						if len(value) > 20 && !strings.ContainsAny(value, " \t\n") {
+							// This might be a token - warn about it
+							return fmt.Errorf("potential plaintext credential detected: %s", pattern)
+						}
+					}
+				}
+			}
+		}
+	}
+	
+	return nil
 }
 
 func LoadFile(filename string) (*Config, error) {
@@ -172,6 +340,15 @@ func LoadFileWithEnv(filename string, lookupEnv func(string) (string, bool)) (*C
 	if strings.TrimSpace(filename) == "" {
 		return nil, errors.New("configuration file path is required")
 	}
+
+	// Security check: warn if config file contains potential plaintext passwords.
+	// This must run before KnownFields(true) decoding so that unknown credential
+	// keys (e.g. "password:") are caught by the scanner rather than silently
+	// rejected by strict field validation before the check can run.
+	if err := checkForPlaintextCredentials(filename); err != nil {
+		slog.Warn("Potential security issue in configuration", "file", filename, "error", err)
+	}
+
 	f, err := os.Open(filename)
 	if err != nil {
 		return nil, fmt.Errorf("open configuration %q: %w", filename, err)
@@ -215,6 +392,9 @@ func (c *Config) validateWithEnv(lookupEnv func(string) (string, bool)) error {
 	if strings.TrimSpace(c.Server.Listen) == "" {
 		return errors.New("server.listen is required")
 	}
+	if err := validateServerListenAddress(c.Server.Listen); err != nil {
+		return fmt.Errorf("server.listen: %w", err)
+	}
 	if err := validatePassive(c.Server.Passive); err != nil {
 		return err
 	}
@@ -222,6 +402,11 @@ func (c *Config) validateWithEnv(lookupEnv func(string) (string, bool)) error {
 		return errors.New("server.tls.cert and server.tls.key are required when TLS is enabled")
 	}
 	if err := c.validateOCIS(); err != nil {
+		return err
+	}
+	
+	// Validate HTTP configuration
+	if err := c.validateHTTP(lookupEnv); err != nil {
 		return err
 	}
 	if !filepath.IsAbs(c.Spool.Directory) {
@@ -247,8 +432,21 @@ func (c *Config) validateWithEnv(lookupEnv func(string) (string, bool)) error {
 		}
 		seen[account.Username] = struct{}{}
 
+		// Validate password hash
 		if _, err := parseArgon2ID(account.PasswordHash); err != nil {
 			return fmt.Errorf("%s.password_hash: %w", prefix, err)
+		}
+		
+		// Check for known example/test password hashes
+		// These are commonly used in examples and should not be used in production
+	exampleHashes := []string{
+			"$argon2id$v=19$m=65536,t=3,p=1$MDEyMzQ1Njc4OWFiY2RlZg$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+			"$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJC1OeqncgJ2almHUfLnhtRTVrjD8zGQ",
+		}
+		for _, exampleHash := range exampleHashes {
+			if strings.Contains(account.PasswordHash, exampleHash) {
+				return fmt.Errorf("%s.password_hash: example/default hash detected. Generate a unique hash for production use", prefix)
+			}
 		}
 		if strings.TrimSpace(account.OCIS.Username) == "" {
 			return fmt.Errorf("%s.ocis.username is required", prefix)
@@ -283,6 +481,45 @@ func (c *Config) validateWithEnv(lookupEnv func(string) (string, bool)) error {
 	return nil
 }
 
+func (c *Config) validateHTTP(lookupEnv func(string) (string, bool)) error {
+	// Validate HTTP auth configuration if enabled
+	if c.HTTP.Auth.Enabled {
+		switch c.HTTP.Auth.Method {
+		case "basic":
+			// Basic auth requires username and password
+			if strings.TrimSpace(c.HTTP.Auth.Username) == "" {
+				return fmt.Errorf("http.auth.username is required when http.auth.enabled=true and method=basic")
+			}
+			if strings.TrimSpace(c.HTTP.Auth.Password) == "" {
+				// Check if we can generate a password later, but warn for now
+				// We'll generate a random password if not provided
+				c.HTTP.Auth.Password = "" // Will be generated at runtime
+			}
+		case "bearer":
+			// Bearer auth requires token
+			if strings.TrimSpace(c.HTTP.Auth.BearerToken) == "" && strings.TrimSpace(c.HTTP.Auth.BearerTokenEnv) == "" {
+				return fmt.Errorf("http.auth.bearer_token or http.auth.bearer_token_env is required when http.auth.enabled=true and method=bearer")
+			}
+			if strings.TrimSpace(c.HTTP.Auth.BearerTokenEnv) != "" {
+				token, ok := lookupEnv(c.HTTP.Auth.BearerTokenEnv)
+				if !ok || strings.TrimSpace(token) == "" {
+					return fmt.Errorf("http.auth.bearer_token_env %q is not set or empty", c.HTTP.Auth.BearerTokenEnv)
+				}
+				c.HTTP.Auth.BearerToken = token
+			}
+		case "none", "":
+			// No authentication, but warn if enabled
+			if c.HTTP.Auth.Enabled {
+				return fmt.Errorf("http.auth.method is required when http.auth.enabled=true")
+			}
+		default:
+			return fmt.Errorf("http.auth.method %q is invalid; expected basic, bearer, or none", c.HTTP.Auth.Method)
+		}
+	}
+	
+	return nil
+}
+
 func (c *Config) validateOCIS() error {
 	if strings.TrimSpace(c.OCIS.URL) != "" {
 		u, err := url.Parse(c.OCIS.URL)
@@ -304,6 +541,159 @@ func (c *Config) validateOCIS() error {
 		}
 	}
 	return nil
+}
+
+// ValidateTLSConfig validates TLS configuration at startup
+// This ensures that TLS certificates are valid before the server starts
+func (c *Config) ValidateTLSConfig() error {
+	if !c.Server.TLS.Enabled {
+		// TLS is not enabled, nothing to validate
+		return nil
+	}
+
+	// Check if certificate and key files are specified
+	if strings.TrimSpace(c.Server.TLS.Cert) == "" {
+		return fmt.Errorf("server.tls.cert is required when TLS is enabled")
+	}
+	if strings.TrimSpace(c.Server.TLS.Key) == "" {
+		return fmt.Errorf("server.tls.key is required when TLS is enabled")
+	}
+
+	// Check if certificate file exists and is readable
+	if _, err := os.Stat(c.Server.TLS.Cert); os.IsNotExist(err) {
+		return fmt.Errorf("TLS certificate file not found: %s", c.Server.TLS.Cert)
+	}
+	if _, err := os.Stat(c.Server.TLS.Key); os.IsNotExist(err) {
+		return fmt.Errorf("TLS key file not found: %s", c.Server.TLS.Key)
+	}
+
+	// Load and validate the certificate
+	cert, err := tls.LoadX509KeyPair(c.Server.TLS.Cert, c.Server.TLS.Key)
+	if err != nil {
+		return fmt.Errorf("failed to load TLS certificate/key pair: %w", err)
+	}
+
+	// Parse the certificate to check for issues
+	x509Cert, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return fmt.Errorf("failed to parse TLS certificate: %w", err)
+	}
+
+	// Validate certificate expiration
+	now := time.Now()
+	if now.After(x509Cert.NotAfter) {
+		return fmt.Errorf("TLS certificate expired on %s", x509Cert.NotAfter.Format(time.RFC3339))
+	}
+	if now.Before(x509Cert.NotBefore) {
+		return fmt.Errorf("TLS certificate not yet valid (valid from %s)", x509Cert.NotBefore.Format(time.RFC3339))
+	}
+
+	// Validate certificate key strength
+	switch pubKey := x509Cert.PublicKey.(type) {
+	case *rsa.PublicKey:
+		// rsa.PublicKey.Size() returns bytes, not bits; use N.BitLen() for bits.
+		keyBits := pubKey.N.BitLen()
+		if keyBits < 2048 {
+			return fmt.Errorf("TLS certificate RSA key too weak: %d bits (minimum 2048)", keyBits)
+		}
+	case *ecdsa.PublicKey:
+		// Check ECDSA curve strength
+		// P-256, P-384, and P-521 are acceptable
+		curveName := pubKey.Curve.Params().Name
+		if curveName != "P-256" && curveName != "P-384" && curveName != "P-521" {
+			return fmt.Errorf("TLS certificate uses unsupported ECDSA curve: %s", curveName)
+		}
+	case ed25519.PublicKey:
+		// Ed25519 is acceptable
+	default:
+		return fmt.Errorf("TLS certificate uses unsupported public key type: %T", pubKey)
+	}
+
+	return nil
+}
+
+// validateServerListenAddress validates the server listen address format.
+// Supports hostname:port, :port, IPv4:port, and [IPv6]:port including
+// scoped IPv6 addresses with zone identifiers (e.g. [fe80::1%eth0]:2121).
+func validateServerListenAddress(addr string) error {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return errors.New("address is required")
+	}
+
+	// Support both hostname:port and :port formats
+	if !strings.Contains(addr, ":") {
+		return fmt.Errorf("invalid address format %q: expected host:port or :port", addr)
+	}
+
+	// Split into host and port parts
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		// If it starts with :, it might be just a port
+		if strings.HasPrefix(addr, ":") {
+			port = strings.TrimPrefix(addr, ":")
+			host = ""
+		} else {
+			return fmt.Errorf("invalid address format %q: %w", addr, err)
+		}
+	}
+
+	// Validate port
+	if port == "" {
+		return errors.New("port is required")
+	}
+	portNum, err := strconv.Atoi(port)
+	if err != nil {
+		return fmt.Errorf("invalid port %q: %w", port, err)
+	}
+	if portNum < 1 || portNum > 65535 {
+		return fmt.Errorf("port %d must be between 1 and 65535", portNum)
+	}
+
+	// Validate host if provided
+	if host != "" && host != "0.0.0.0" && host != "::" && host != "*" {
+		// Strip IPv6 zone identifier (e.g. fe80::1%eth0 -> fe80::1) before parsing
+		hostForParse := host
+		if idx := strings.Index(hostForParse, "%"); idx >= 0 {
+			hostForParse = hostForParse[:idx]
+		}
+		if ip := net.ParseIP(hostForParse); ip == nil {
+			// Check if it's a valid hostname
+			if !isValidHostname(host) {
+				return fmt.Errorf("invalid hostname %q", host)
+			}
+		}
+	}
+
+	return nil
+}
+
+// isValidHostname checks if a string is a valid hostname
+func isValidHostname(hostname string) bool {
+	if len(hostname) > 253 {
+		return false
+	}
+
+	labels := strings.Split(hostname, ".")
+	if len(labels) == 0 {
+		return false
+	}
+
+	for _, label := range labels {
+		if len(label) == 0 || len(label) > 63 {
+			return false
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, r := range label {
+			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-') {
+				return false
+			}
+		}
+	}
+
+	return true
 }
 
 func validatePassive(p PassiveConfig) error {

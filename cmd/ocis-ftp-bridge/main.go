@@ -8,7 +8,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -39,31 +39,63 @@ func main() {
 	}
 
 	if *configPath == "" {
-		log.Fatal("-config is required")
+		fmt.Fprintf(os.Stderr, "Error: -config is required\n")
+		os.Exit(1)
 	}
 
-	// Log version information at startup
-	log.Printf("Starting %s version %s (commit: %s, built: %s)", os.Args[0], Version, CommitSHA, BuildDate)
-
+	// Create observability with default logger config
+	// We need to load config first to get logging configuration
 	cfg, err := config.LoadFile(*configPath)
 	if err != nil {
-		log.Fatalf("failed to load configuration: %v", err)
+		fmt.Fprintf(os.Stderr, "Error: failed to load configuration: %v\n", err)
+		os.Exit(1)
 	}
 
-	obs, err := observability.New(observability.Config{Debug: cfg.Observability.Debug})
+	// Create observability client with logging configuration
+	obsConfig := observability.Config{
+		Debug:  cfg.Observability.Debug,
+		Logger: cfg.Observability.Logger,
+	}
+	
+	obs, err := observability.New(obsConfig)
 	if err != nil {
-		log.Fatalf("failed to initialize observability: %v", err)
+		fmt.Fprintf(os.Stderr, "Error: failed to initialize observability: %v\n", err)
+		os.Exit(1)
 	}
 	defer obs.Stop()
+
+	// Get the structured logger
+	logger := obs.Logger()
+
+	// Log version information at startup with structured fields
+	logger.Info("Starting service",
+		slog.String("version", Version),
+		slog.String("commit", CommitSHA),
+		slog.String("built", BuildDate),
+		slog.String("config_path", *configPath),
+	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	logger.Info("Initializing server...")
+
 	srv, err := server.New(cfg, obs)
 	if err != nil {
-		log.Fatalf("failed to create server: %v", err)
+		logger.Error("Failed to create server",
+			slog.String("error", err.Error()),
+		)
+		os.Exit(1)
 	}
+
+	logger.Info("Server initialized, starting...")
+
 	if err := srv.Run(ctx); err != nil {
-		log.Fatalf("server failed: %v", err)
+		logger.Error("Server failed",
+			slog.String("error", err.Error()),
+		)
+		os.Exit(1)
 	}
+
+	logger.Info("Server shutdown complete")
 }
