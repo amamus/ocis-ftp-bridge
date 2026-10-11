@@ -185,115 +185,115 @@ jobs:
         package main
 
         import (
-			"fmt"
-			"io"
-			"log"
-			"net/http"
-			"os"
-			"path/filepath"
-			"strings"
-		)
+        			"fmt"
+        			"io"
+        			"log"
+        			"net/http"
+        			"os"
+        			"path/filepath"
+        			"strings"
+        		)
 
         var (
-			uploadDir = "/tmp/mock-ocis-uploads"
-			uploadedFiles = make(map[string][]byte)
-		)
+        			uploadDir = "/tmp/mock-ocis-uploads"
+        			uploadedFiles = make(map[string][]byte)
+        		)
 
         func init() {
-			os.MkdirAll(uploadDir, 0755)
-		}
+        			os.MkdirAll(uploadDir, 0755)
+        		}
 
         func webdavHandler(w http.ResponseWriter, r *http.Request) {
-			path := strings.TrimPrefix(r.URL.Path, "/webdav")
-			fullPath := filepath.Join(uploadDir, path)
-			
-			switch r.Method {
-			case "MKCOL":
-				os.MkdirAll(fullPath, 0755)
-				w.WriteHeader(http.StatusCreated)
-				
-			case "PUT":
-				os.MkdirAll(filepath.Dir(fullPath), 0755)
-				data, err := io.ReadAll(r.Body)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-					return
-				}
-				if err := os.WriteFile(fullPath, data, 0644); err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-					return
-				}
-				uploadedFiles[fullPath] = data
-				w.WriteHeader(http.StatusCreated)
-				
-			case "GET", "HEAD":
-				if _, err := os.Stat(fullPath); err == nil {
-					if r.Method == "GET" {
-						data, _ := os.ReadFile(fullPath)
-						w.Write(data)
-					}
-					w.WriteHeader(http.StatusOK)
-				} else {
-					http.Error(w, "Not Found", http.StatusNotFound)
-				}
-				
-			case "PROPFIND":
-				files, _ := os.ReadDir(uploadDir)
-				xml := `<?xml version="1.0" encoding="utf-8" ?>
-				<multistatus xmlns="DAV:">
-				`
-				for _, f := range files {
-					info, _ := f.Info()
-					if !info.IsDir() {
-						xml += fmt.Sprintf("<response><href>/webdav/%s</href><propstat><prop><getcontentlength>%d</getcontentlength></prop><status>HTTP/1.1 200 OK</status></propstat></response>", 
-							f.Name(), info.Size())
-					}
-				}
-				xml += "</multistatus>"
-				w.Header().Set("Content-Type", "application/xml")
-				w.WriteHeader(http.StatusMultiStatus)
-				w.Write([]byte(xml))
-				
-			default:
-				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			}
-		}
+        			path := strings.TrimPrefix(r.URL.Path, "/webdav")
+        			fullPath := filepath.Join(uploadDir, path)
+        			
+        			switch r.Method {
+        			case "MKCOL":
+        				os.MkdirAll(fullPath, 0755)
+        				w.WriteHeader(http.StatusCreated)
+        				
+        			case "PUT":
+        				os.MkdirAll(filepath.Dir(fullPath), 0755)
+        				data, err := io.ReadAll(r.Body)
+        				if err != nil {
+        					http.Error(w, err.Error(), http.StatusInternalServerError)
+        					return
+        				}
+        				if err := os.WriteFile(fullPath, data, 0644); err != nil {
+        					http.Error(w, err.Error(), http.StatusInternalServerError)
+        					return
+        				}
+        				uploadedFiles[fullPath] = data
+        				w.WriteHeader(http.StatusCreated)
+        				
+        			case "GET", "HEAD":
+        				if _, err := os.Stat(fullPath); err == nil {
+        					if r.Method == "GET" {
+        						data, _ := os.ReadFile(fullPath)
+        						w.Write(data)
+        					}
+        					w.WriteHeader(http.StatusOK)
+        				} else {
+        					http.Error(w, "Not Found", http.StatusNotFound)
+        				}
+        				
+        			case "PROPFIND":
+        				files, _ := os.ReadDir(uploadDir)
+        				xml := `<?xml version="1.0" encoding="utf-8" ?>
+        				<multistatus xmlns="DAV:">
+        				`
+        				for _, f := range files {
+        					info, _ := f.Info()
+        					if !info.IsDir() {
+        						xml += fmt.Sprintf("<response><href>/webdav/%s</href><propstat><prop><getcontentlength>%d</getcontentlength></prop><status>HTTP/1.1 200 OK</status></propstat></response>", 
+        							f.Name(), info.Size())
+        					}
+        				}
+        				xml += "</multistatus>"
+        				w.Header().Set("Content-Type", "application/xml")
+        				w.WriteHeader(http.StatusMultiStatus)
+        				w.Write([]byte(xml))
+        				
+        			default:
+        				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+        			}
+        		}
 
         func graphHandler(w http.ResponseWriter, r *http.Request) {
-			if strings.Contains(r.URL.Path, "/drives") {
-				json := `{
-					"value": [
-						{
-							"id": "test-drive-id",
-							"name": "Test Drive",
-							"webUrl": "http://localhost/webdav",
-							"driveType": "personal"
-						},
-						{
-							"id": "test-drive-id-2",
-							"name": "Test Drive 2",
-							"webUrl": "http://localhost/webdav",
-							"driveType": "personal"
-						}
-					]
-				}`
-				w.Header().Set("Content-Type", "application/json")
-				w.Write([]byte(json))
-			}
-		}
+        			if strings.Contains(r.URL.Path, "/drives") {
+        				json := `{
+        					"value": [
+        						{
+        							"id": "test-drive-id",
+        							"name": "Test Drive",
+        							"webUrl": "http://localhost/webdav",
+        							"driveType": "personal"
+        						},
+        						{
+        							"id": "test-drive-id-2",
+        							"name": "Test Drive 2",
+        							"webUrl": "http://localhost/webdav",
+        							"driveType": "personal"
+        						}
+        					]
+        				}`
+        				w.Header().Set("Content-Type", "application/json")
+        				w.Write([]byte(json))
+        			}
+        		}
 
         func main() {
-			http.HandleFunc("/webdav/", webdavHandler)
-			http.HandleFunc("/webdav", webdavHandler)
-			
-			go func() {
-				http.HandleFunc("/", graphHandler)
-				log.Fatal(http.ListenAndServe(":9100", nil))
-			}()
-			
-			log.Println("Mock oCIS WebDAV server starting on :9200")
-			log.Fatal(http.ListenAndServe(":9200", nil))
-		}
+        			http.HandleFunc("/webdav/", webdavHandler)
+        			http.HandleFunc("/webdav", webdavHandler)
+        			
+        			go func() {
+        				http.HandleFunc("/", graphHandler)
+        				log.Fatal(http.ListenAndServe(":9100", nil))
+        			}()
+        			
+        			log.Println("Mock oCIS WebDAV server starting on :9200")
+        			log.Fatal(http.ListenAndServe(":9200", nil))
+        		}
         EOF
         
         go build -o mock-ocis mock-ocis.go
@@ -479,10 +479,10 @@ jobs:
         curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
         
         echo "Generating SPDX SBOM..."
-        syft dir:. -o spdx-json=sbom.spdx.json --exclude "**/vendor/**" --exclude "**/test/**" --exclude ".git/**"
+        syft dir:. -o spdx-json=sbom.spdx.json --exclude "**/vendor/**" --exclude "**/test/**" --exclude "**/.git/**"
         
         echo "Generating CycloneDX SBOM..."
-        syft dir:. -o cyclonedx-json=sbom.cyclonedx.json --exclude "**/vendor/**" --exclude "**/test/**" --exclude ".git/**"
+        syft dir:. -o cyclonedx-json=sbom.cyclonedx.json --exclude "**/vendor/**" --exclude "**/test/**" --exclude "**/.git/**"
         
         echo "SBOM generation completed"
 

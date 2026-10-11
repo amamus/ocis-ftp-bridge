@@ -81,9 +81,12 @@ ENV APP_NAME=${APP_NAME} \
 	CONFIG_FILE=/app/config/config.yaml
 
 # Expose ports
-EXPOSE 2121/tcp  # FTP control port
-EXPOSE 40000-50000/tcp  # FTP passive port range (example)
-EXPOSE 9200/tcp  # HTTP operations/health port
+# FTP control port
+EXPOSE 2121/tcp
+# FTP passive port range (example)
+EXPOSE 40000-50000/tcp
+# HTTP operations/health port
+EXPOSE 9200/tcp
 
 # Set entrypoint
 ENTRYPOINT ["/app/bin/ocis-ftp-bridge"]

@@ -32,18 +32,18 @@ cd "$PROJECT_DIR"
 case "$FORMAT" in
     spdx)
         echo "Generating SPDX SBOM..."
-        syft dir:. -o spdx-json="$OUTPUT_DIR/sbom.spdx.json" --exclude "**/vendor/**" --exclude "**/test/**" --exclude ".git/**"
+        syft dir:. -o spdx-json="$OUTPUT_DIR/sbom.spdx.json" --exclude "**/vendor/**" --exclude "**/test/**" --exclude "**/.git/**"
         ;;
     cyclonedx)
         echo "Generating CycloneDX SBOM..."
-        syft dir:. -o cyclonedx-json="$OUTPUT_DIR/sbom.cyclonedx.json" --exclude "**/vendor/**" --exclude "**/test/**" --exclude ".git/**"
+        syft dir:. -o cyclonedx-json="$OUTPUT_DIR/sbom.cyclonedx.json" --exclude "**/vendor/**" --exclude "**/test/**" --exclude "**/.git/**"
         ;;
     all)
         echo "Generating SPDX SBOM..."
-        syft dir:. -o spdx-json="$OUTPUT_DIR/sbom.spdx.json" --exclude "**/vendor/**" --exclude "**/test/**" --exclude ".git/**"
+        syft dir:. -o spdx-json="$OUTPUT_DIR/sbom.spdx.json" --exclude "**/vendor/**" --exclude "**/test/**" --exclude "**/.git/**"
         
         echo "Generating CycloneDX SBOM..."
-        syft dir:. -o cyclonedx-json="$OUTPUT_DIR/sbom.cyclonedx.json" --exclude "**/vendor/**" --exclude "**/test/**" --exclude ".git/**"
+        syft dir:. -o cyclonedx-json="$OUTPUT_DIR/sbom.cyclonedx.json" --exclude "**/vendor/**" --exclude "**/test/**" --exclude "**/.git/**"
         
         echo "Scanning for vulnerabilities..."
         grype sbom:"$OUTPUT_DIR/sbom.spdx.json" -o json -q > "$OUTPUT_DIR/vulnerabilities.json" 2>/dev/null || echo "Vulnerability scan completed (no critical issues found)"

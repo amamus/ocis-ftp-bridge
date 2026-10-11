@@ -11,6 +11,10 @@ on:
     # Run weekly to update SBOM with any new vulnerabilities
     - cron: '0 0 * * 0'
 
+# The generate-sbom job commits updated SBOM files back to the repository
+permissions:
+  contents: write
+
 jobs:
   generate-sbom:
     name: Generate SBOM
@@ -43,10 +47,10 @@ jobs:
       - name: Generate SBOMs for dependencies
         run: |
           echo "Generating SPDX SBOM..."
-          syft dir:. -o spdx-json=sbom.spdx.json --exclude "**/vendor/**" --exclude "**/test/**" --exclude ".git/**"
+          syft dir:. -o spdx-json=sbom.spdx.json --exclude "**/vendor/**" --exclude "**/test/**" --exclude "**/.git/**"
           
           echo "Generating CycloneDX SBOM..."
-          syft dir:. -o cyclonedx-json=sbom.cyclonedx.json --exclude "**/vendor/**" --exclude "**/test/**" --exclude ".git/**"
+          syft dir:. -o cyclonedx-json=sbom.cyclonedx.json --exclude "**/vendor/**" --exclude "**/test/**" --exclude "**/.git/**"
           
           echo "SBOM files generated:"
           ls -la sbom.*.json
