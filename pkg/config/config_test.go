@@ -492,3 +492,41 @@ func TestValidateTLSConfigRSAKeyStrength(t *testing.T) {
 		}
 	})
 }
+
+// TestValidateServerListenAddress verifies that listen address validation
+// accepts various formats including scoped IPv6 with zone identifiers.
+func TestValidateServerListenAddress(t *testing.T) {
+	valid := []string{
+		":2121",
+		"0.0.0.0:2121",
+		"127.0.0.1:2121",
+		"[::]:2121",
+		"[::1]:2121",
+		"[fe80::1%eth0]:2121", // Scoped IPv6 with zone
+		"localhost:2121",
+		"example.com:9200",
+	}
+	for _, addr := range valid {
+		t.Run("valid/"+addr, func(t *testing.T) {
+			if err := validateServerListenAddress(addr); err != nil {
+				t.Errorf("expected %q to be valid, got error: %v", addr, err)
+			}
+		})
+	}
+
+	invalid := []string{
+		"",
+		"noport",
+		":0",
+		":99999",
+		"host:abc",
+		"-bad-.com:2121",
+	}
+	for _, addr := range invalid {
+		t.Run("invalid/"+addr, func(t *testing.T) {
+			if err := validateServerListenAddress(addr); err == nil {
+				t.Errorf("expected %q to be invalid", addr)
+			}
+		})
+	}
+}
