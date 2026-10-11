@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +26,19 @@ import (
 	"github.com/amamus/ocis-ftp-bridge/pkg/transfer"
 	"github.com/amamus/ocis-ftp-bridge/pkg/webdav"
 )
+
+// extractClientIP extracts the client IP from a RemoteAddr string.
+// RemoteAddr typically includes a port (e.g. "192.168.1.1:12345"); rate
+// limiting must key on the IP alone so clients cannot bypass limits by
+// reconnecting with a new ephemeral port.
+func extractClientIP(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		// No port present; return as-is
+		return remoteAddr
+	}
+	return host
+}
 
 // ConnectionTracker tracks connections per IP for rate limiting
 type ConnectionTracker struct {
@@ -81,14 +95,14 @@ func (ct *ConnectionTracker) AllowConnection(ip string) bool {
 	ct.mu.Lock()
 	defer ct.mu.Unlock()
 	
-	// Check global limit
-	if ct.globalCount >= ct.maxGlobal {
+	// Check global limit (0 means unlimited)
+	if ct.maxGlobal > 0 && ct.globalCount >= ct.maxGlobal {
 		return false
 	}
-	
-	// Check per-IP limit
+
+	// Check per-IP limit (0 means unlimited)
 	count, exists := ct.ipConnections[ip]
-	if exists && count >= int64(ct.maxPerIP) {
+	if ct.maxPerIP > 0 && exists && count >= int64(ct.maxPerIP) {
 		return false
 	}
 	
@@ -315,9 +329,9 @@ func NewBridgeDriver(
 // AuthUser is called when USER command is received. Returns a ClientDriver
 // if authentication succeeds.
 func (d *BridgeDriver) AuthUser(cc ftpserver.ClientContext, user, password string) (ftpserver.ClientDriver, error) {
-	// Get client IP for rate limiting
-	clientIP := cc.RemoteAddr().String()
-	
+	// Get client IP for rate limiting (strip ephemeral port)
+	clientIP := extractClientIP(cc.RemoteAddr().String())
+
 	// Check shutdown
 	select {
 	case <-d.shutdownChan:
@@ -328,11 +342,6 @@ func (d *BridgeDriver) AuthUser(cc ftpserver.ClientContext, user, password strin
 	// Rate limiting: Check if IP is locked out due to too many failed attempts
 	if d.authAttemptTracker != nil && d.authAttemptTracker.IsIPLockedOut(clientIP) {
 		return nil, fmt.Errorf("too many failed authentication attempts from %s. Try again later", clientIP)
-	}
-
-	// Rate limiting: Check connection limits per IP
-	if d.connectionTracker != nil && !d.connectionTracker.AllowConnection(clientIP) {
-		return nil, fmt.Errorf("connection limit reached for this IP")
 	}
 
 	// Check global connection limit
@@ -418,20 +427,19 @@ func (d *BridgeDriver) OnLogin(client ftpserver.ClientContext) error {
 
 // OnLogout is called when a client disconnects.
 func (d *BridgeDriver) OnLogout(client ftpserver.ClientContext) error {
-	// Decrement connection counter
-	atomic.AddInt64(&d.activeConnections, -1)
-	
-	// Release rate limiting connection tracking
-	if d.connectionTracker != nil {
-		d.connectionTracker.ReleaseConnection(client.RemoteAddr().String())
-	}
-
+	// Connection tracking is handled in ClientConnected/ClientDisconnected
+	// to follow the actual socket lifecycle, not the authentication lifecycle.
 	d.obs.Log("info", fmt.Sprintf("FTP client logged out (ID: %d, addr: %s)", client.ID(), client.RemoteAddr().String()))
 	return nil
 }
 
 // GetSettings returns the server settings.
 func (d *BridgeDriver) GetSettings() (*ftpserver.Settings, error) {
+	// Log warning if plain FTP is enabled (insecure)
+	if !d.cfg.Server.TLS.Enabled {
+		d.obs.Log("warn", "Plain FTP is enabled! Credentials and data will be transmitted in cleartext. This is a security risk. Enable TLS for production use.")
+	}
+	
 	settings := &ftpserver.Settings{
 		ListenAddr:       d.cfg.Server.Listen,
 		PublicHost:      d.cfg.Server.Passive.PublicIP,
@@ -480,12 +488,33 @@ func (d *BridgeDriver) GetTLSConfig() (*tls.Config, error) {
 }
 
 // ClientConnected is called when a new client connects.
+// Connection slots are acquired here (per TCP socket) so that clients
+// cannot bypass limits by reconnecting, and unauthenticated connections
+// are still counted.
 func (d *BridgeDriver) ClientConnected(cc ftpserver.ClientContext) (string, error) {
+	clientIP := extractClientIP(cc.RemoteAddr().String())
+
+	// Acquire connection slot for rate limiting
+	if d.connectionTracker != nil && !d.connectionTracker.AllowConnection(clientIP) {
+		return "", fmt.Errorf("connection limit reached for this IP")
+	}
+
+	// Increment active connection counter
+	atomic.AddInt64(&d.activeConnections, 1)
+
 	return "220 ocis-ftp-bridge ready", nil
 }
 
 // ClientDisconnected is called when a client disconnects.
+// Connection slots are released here so they follow the actual socket lifecycle.
 func (d *BridgeDriver) ClientDisconnected(cc ftpserver.ClientContext) {
+	clientIP := extractClientIP(cc.RemoteAddr().String())
+
+	// Release connection slot
+	if d.connectionTracker != nil {
+		d.connectionTracker.ReleaseConnection(clientIP)
+	}
+
 	// Decrement connection counter
 	atomic.AddInt64(&d.activeConnections, -1)
 
