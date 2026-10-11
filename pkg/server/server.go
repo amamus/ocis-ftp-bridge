@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/amamus/ocis-ftp-bridge/pkg/config"
 	"github.com/amamus/ocis-ftp-bridge/pkg/ftp"
@@ -64,7 +65,18 @@ func New(cfg *config.Config, obs observability.Client) (Server, error) {
 	ftpServer := ftp.NewServer(ftpDriver)
 
 	// Initialize HTTP operations server
-	httpServer := http.NewOperationsServer(cfg.HTTP.Address)
+	// For health checks, use oCIS URLs directly without authentication
+	// This assumes that the oCIS server has public health endpoints
+	// or that authentication is handled at a different level
+	healthCheckConfig := http.HealthCheckConfig{
+		OCISURL:        cfg.OCIS.URL,
+		OCISUsername:   "", // Health checks don't require authentication
+		OCISPassword:   "", // Health checks don't require authentication
+		WebDAVURL:      cfg.OCIS.WebDAVURL,
+		SpoolDirectory: cfg.Spool.Directory,
+		CheckTimeout:   5 * time.Second, // Default timeout
+	}
+	httpServer := http.NewOperationsServer(cfg.HTTP.Address, healthCheckConfig)
 
 	return &service{
 		cfg:            cfg,

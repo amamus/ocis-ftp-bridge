@@ -8,7 +8,7 @@ import (
 
 func TestOperationsServer_Creation(t *testing.T) {
 	t.Run("create server with default address", func(t *testing.T) {
-		server := NewOperationsServer(":9200")
+		server := NewOperationsServer(":9200", HealthCheckConfig{CheckTimeout: 5 * time.Second})
 		if server == nil {
 			t.Fatal("Expected non-nil server")
 		}
@@ -19,7 +19,7 @@ func TestOperationsServer_Creation(t *testing.T) {
 	})
 
 	t.Run("create server with random port", func(t *testing.T) {
-		server := NewOperationsServer(":0")
+		server := NewOperationsServer(":0", HealthCheckConfig{CheckTimeout: 5 * time.Second})
 		if server == nil {
 			t.Fatal("Expected non-nil server")
 		}
@@ -28,7 +28,7 @@ func TestOperationsServer_Creation(t *testing.T) {
 
 func TestOperationsServer_StartStop(t *testing.T) {
 	t.Run("start and stop without error", func(t *testing.T) {
-		server := NewOperationsServer(":0")
+		server := NewOperationsServer(":0", HealthCheckConfig{CheckTimeout: 5 * time.Second})
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -62,7 +62,7 @@ func TestOperationsServer_StartStop(t *testing.T) {
 	})
 
 	t.Run("double start returns error", func(t *testing.T) {
-		server := NewOperationsServer(":0")
+		server := NewOperationsServer(":0", HealthCheckConfig{CheckTimeout: 5 * time.Second})
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -83,7 +83,7 @@ func TestOperationsServer_StartStop(t *testing.T) {
 	})
 
 	t.Run("double stop is safe", func(t *testing.T) {
-		server := NewOperationsServer(":0")
+		server := NewOperationsServer(":0", HealthCheckConfig{CheckTimeout: 5 * time.Second})
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -110,7 +110,7 @@ func TestOperationsServer_StartStop(t *testing.T) {
 
 func TestOperationsServer_HealthState(t *testing.T) {
 	t.Run("health state management", func(t *testing.T) {
-		server := NewOperationsServer(":0")
+		server := NewOperationsServer(":0", HealthCheckConfig{CheckTimeout: 5 * time.Second})
 
 		// Initially healthy
 		if !server.IsHealthy() {
@@ -131,7 +131,7 @@ func TestOperationsServer_HealthState(t *testing.T) {
 	})
 
 	t.Run("ready state management", func(t *testing.T) {
-		server := NewOperationsServer(":0")
+		server := NewOperationsServer(":0", HealthCheckConfig{CheckTimeout: 5 * time.Second})
 
 		// Initially ready
 		if !server.IsReady() {
@@ -154,7 +154,7 @@ func TestOperationsServer_HealthState(t *testing.T) {
 
 func TestOperationsServer_Metrics(t *testing.T) {
 	t.Run("metrics methods do not panic", func(t *testing.T) {
-		server := NewOperationsServer(":0")
+		server := NewOperationsServer(":0", HealthCheckConfig{CheckTimeout: 5 * time.Second})
 
 		// These should not panic
 		server.IncrementFTPSessionTotal("success")
