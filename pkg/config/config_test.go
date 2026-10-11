@@ -1,12 +1,19 @@
 package config
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/pem"
 	"log/slog"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -363,6 +370,110 @@ OWPfGxbutT0P2P902y1ACyDnQs=
 		cfg.Server.TLS.Key = keyFile
 		if err := cfg.ValidateTLSConfig(); err == nil {
 			t.Fatal("expected error for expired certificate")
+		}
+	})
+}
+
+// generateSelfSignedCert creates a self-signed certificate with an RSA key
+// of the specified bit size, returning the cert and key PEM data.
+func generateSelfSignedCert(t *testing.T, keyBits int) (certPEM, keyPEM []byte) {
+	t.Helper()
+
+	priv, err := rsa.GenerateKey(rand.Reader, keyBits)
+	if err != nil {
+		t.Fatalf("failed to generate RSA key: %v", err)
+	}
+
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			CommonName: "test.example.com",
+		},
+		NotBefore:   time.Now().Add(-time.Hour),
+		NotAfter:    time.Now().Add(24 * time.Hour),
+		KeyUsage:    x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:    []string{"test.example.com"},
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatalf("failed to create certificate: %v", err)
+	}
+
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	keyPEM = pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(priv),
+	})
+
+	return certPEM, keyPEM
+}
+
+// TestValidateTLSConfigRSAKeyStrength verifies that RSA key strength is
+// measured in bits, not bytes. A 2048-bit RSA certificate must be accepted
+// (previously rejected because rsa.PublicKey.Size() returns bytes: 256 < 2048).
+func TestValidateTLSConfigRSAKeyStrength(t *testing.T) {
+	t.Run("accepts 2048-bit RSA certificate", func(t *testing.T) {
+		certPEM, keyPEM := generateSelfSignedCert(t, 2048)
+		tmpDir := t.TempDir()
+		certFile := filepath.Join(tmpDir, "cert.crt")
+		keyFile := filepath.Join(tmpDir, "key.key")
+		if err := os.WriteFile(certFile, certPEM, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(keyFile, keyPEM, 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg := New()
+		cfg.Server.TLS.Enabled = true
+		cfg.Server.TLS.Cert = certFile
+		cfg.Server.TLS.Key = keyFile
+		if err := cfg.ValidateTLSConfig(); err != nil {
+			t.Fatalf("2048-bit RSA certificate should be accepted, got error: %v", err)
+		}
+	})
+
+	t.Run("accepts 4096-bit RSA certificate", func(t *testing.T) {
+		certPEM, keyPEM := generateSelfSignedCert(t, 4096)
+		tmpDir := t.TempDir()
+		certFile := filepath.Join(tmpDir, "cert.crt")
+		keyFile := filepath.Join(tmpDir, "key.key")
+		if err := os.WriteFile(certFile, certPEM, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(keyFile, keyPEM, 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg := New()
+		cfg.Server.TLS.Enabled = true
+		cfg.Server.TLS.Cert = certFile
+		cfg.Server.TLS.Key = keyFile
+		if err := cfg.ValidateTLSConfig(); err != nil {
+			t.Fatalf("4096-bit RSA certificate should be accepted, got error: %v", err)
+		}
+	})
+
+	t.Run("rejects 1024-bit RSA certificate", func(t *testing.T) {
+		certPEM, keyPEM := generateSelfSignedCert(t, 1024)
+		tmpDir := t.TempDir()
+		certFile := filepath.Join(tmpDir, "cert.crt")
+		keyFile := filepath.Join(tmpDir, "key.key")
+		if err := os.WriteFile(certFile, certPEM, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(keyFile, keyPEM, 0600); err != nil {
+			t.Fatal(err)
+		}
+
+		cfg := New()
+		cfg.Server.TLS.Enabled = true
+		cfg.Server.TLS.Cert = certFile
+		cfg.Server.TLS.Key = keyFile
+		if err := cfg.ValidateTLSConfig(); err == nil {
+			t.Fatal("1024-bit RSA certificate should be rejected")
 		}
 	})
 }

@@ -457,8 +457,10 @@ func (c *Config) ValidateTLSConfig() error {
 	// Validate certificate key strength
 	switch pubKey := x509Cert.PublicKey.(type) {
 	case *rsa.PublicKey:
-		if pubKey.Size() < 2048 {
-			return fmt.Errorf("TLS certificate RSA key too weak: %d bits (minimum 2048)", pubKey.Size())
+		// rsa.PublicKey.Size() returns bytes, not bits; use N.BitLen() for bits.
+		keyBits := pubKey.N.BitLen()
+		if keyBits < 2048 {
+			return fmt.Errorf("TLS certificate RSA key too weak: %d bits (minimum 2048)", keyBits)
 		}
 	case *ecdsa.PublicKey:
 		// Check ECDSA curve strength
