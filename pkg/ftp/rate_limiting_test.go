@@ -95,6 +95,56 @@ func TestConnectionTracker(t *testing.T) {
 	})
 }
 
+// TestConnectionTrackerZeroLimits verifies that zero limits are treated as unlimited.
+func TestConnectionTrackerZeroLimits(t *testing.T) {
+	t.Run("zero global limit is unlimited", func(t *testing.T) {
+		tracker := newConnectionTracker(10, 0) // 0 global = unlimited
+		// Should allow many connections
+		for i := 0; i < 200; i++ {
+			ip := "192.168.1." + string(rune('1'+i%250))
+			if !tracker.AllowConnection(ip) {
+				t.Fatalf("Expected connection %d to be allowed with zero global limit", i+1)
+			}
+		}
+	})
+
+	t.Run("zero per-IP limit is unlimited", func(t *testing.T) {
+		tracker := newConnectionTracker(0, 100) // 0 per-IP = unlimited
+		ip := "192.168.1.1"
+		// Should allow many connections from same IP
+		for i := 0; i < 50; i++ {
+			if !tracker.AllowConnection(ip) {
+				t.Fatalf("Expected connection %d to be allowed with zero per-IP limit", i+1)
+			}
+		}
+	})
+}
+
+// TestExtractClientIP verifies that the client IP is correctly extracted
+// from a RemoteAddr that includes a port.
+func TestExtractClientIP(t *testing.T) {
+	testCases := []struct {
+		name     string
+		remoteAddr string
+		expected string
+	}{
+		{"IPv4 with port", "192.168.1.1:12345", "192.168.1.1"},
+		{"IPv4 with port 2", "10.0.0.1:54321", "10.0.0.1"},
+		{"IPv6 with port", "[::1]:12345", "::1"},
+		{"IPv6 with port 2", "[fe80::1]:8080", "fe80::1"},
+		{"no port (fallback)", "192.168.1.1", "192.168.1.1"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := extractClientIP(tc.remoteAddr)
+			if result != tc.expected {
+				t.Errorf("extractClientIP(%q) = %q, expected %q", tc.remoteAddr, result, tc.expected)
+			}
+		})
+	}
+}
+
 func TestAuthAttemptTracker(t *testing.T) {
 	t.Run("successful authentication resets tracking", func(t *testing.T) {
 		tracker := newAuthAttemptTracker(3, time.Minute, 5*time.Minute)

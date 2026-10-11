@@ -25,13 +25,13 @@ func TestMonitor_CalculateCurrentUsage(t *testing.T) {
 	}{
 		{"file1.txt", "content1"},
 		{"file2.txt", "content2content2"},
-		{".hidden", "hidden"}, // Should be skipped
-		{"file3.tmp", "temp"}, // Should be skipped
+		{".hidden", "hidden"},           // Should be skipped (dotfile)
+		{"upload-abc123.tmp", "active"}, // Should be INCLUDED (active upload)
 	}
 
 	for _, tf := range testFiles {
-		if len(tf.name) > 0 && (tf.name[0] == '.' || filepath.Ext(tf.name) == ".tmp") {
-			continue // Skip files that should be ignored
+		if len(tf.name) > 0 && tf.name[0] == '.' {
+			continue // Skip dotfiles that should be ignored
 		}
 		filePath := filepath.Join(tempDir, tf.name)
 		if err := os.WriteFile(filePath, []byte(tf.content), 0644); err != nil {
@@ -59,9 +59,10 @@ func TestMonitor_CalculateCurrentUsage(t *testing.T) {
 		t.Fatalf("calculateCurrentUsage failed: %v", err)
 	}
 
-	// Expected: file1.txt (7 bytes) + file2.txt (16 bytes) = 23 bytes
-	expectedBytes := uint64(len("content1") + len("content2content2"))
-	expectedCount := uint64(2)
+	// Expected: file1.txt (8 bytes) + file2.txt (16 bytes) + upload-abc123.tmp (6 bytes) = 30 bytes
+	// .tmp files (active uploads) are now included in usage calculation
+	expectedBytes := uint64(len("content1") + len("content2content2") + len("active"))
+	expectedCount := uint64(3)
 
 	if usedBytes != expectedBytes {
 		t.Errorf("Expected %d bytes, got %d", expectedBytes, usedBytes)

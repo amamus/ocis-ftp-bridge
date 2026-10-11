@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/amamus/ocis-ftp-bridge/pkg/errors"
 	"github.com/amamus/ocis-ftp-bridge/pkg/webdav"
@@ -176,30 +177,49 @@ func (tm *TransferManager) normalizeFTPPath(path string) (string, error) {
 		return "", nil
 	}
 
-	// Check for path traversal in original path
-	if strings.Contains(path, "..") {
+	// Check for path traversal in original path (various patterns)
+	traversalPatterns := []string{"..", "/..", "../", `\..\`, `..\`}
+	for _, pattern := range traversalPatterns {
+		if strings.Contains(path, pattern) {
+			return "", errors.PathTraversal(path)
+		}
+	}
+
+	// Check for absolute paths (Unix and Windows)
+	if strings.HasPrefix(path, "/") || strings.HasPrefix(path, `\`) {
 		return "", errors.PathTraversal(path)
 	}
 
-	// Check for absolute paths in original path
-	if strings.HasPrefix(path, "/") {
+	// Check for drive letters (Windows)
+	if len(path) >= 2 && path[1] == ':' {
 		return "", errors.PathTraversal(path)
 	}
 
-	// Remove leading slashes first (should not be needed now, but for safety)
-	path = strings.TrimLeft(path, "/")
+	// Remove leading slashes for normalization
+	path = strings.TrimLeft(path, `/\`)
 
 	// Handle case where we end up with empty string after trimming
 	if path == "" {
 		return "", nil
 	}
 
-	// Clean the path
+	// Clean the path - this resolves . and .. if they somehow got through
 	cleanPath := filepath.Clean(path)
 
-	// Double-check for path traversal after cleaning
+	// After cleaning, the path should not contain ..
 	if strings.Contains(cleanPath, "..") {
 		return "", errors.PathTraversal(path)
+	}
+
+	// Validate that the cleaned path is still a relative path
+	if filepath.IsAbs(cleanPath) {
+		return "", errors.PathTraversal(path)
+	}
+
+	// Check length limits
+	const maxPathLength = 4096
+	if len(cleanPath) > maxPathLength {
+		return "", fmt.Errorf("path too long: %d characters (max %d)", len(cleanPath), maxPathLength)
 	}
 
 	return cleanPath, nil
@@ -219,7 +239,17 @@ func (tm *TransferManager) sanitizeFilename(filename string) (string, error) {
 		return "", errors.PathTraversal(originalFilename)
 	}
 
-	// Remove any path separators
+	// Check for absolute paths (Unix and Windows)
+	if strings.HasPrefix(filename, "/") || strings.HasPrefix(filename, `\`) {
+		return "", errors.PathTraversal(originalFilename)
+	}
+
+	// Check for drive letters (Windows)
+	if len(filename) >= 2 && filename[1] == ':' {
+		return "", errors.PathTraversal(originalFilename)
+	}
+
+	// Extract the base filename (removes any directory components)
 	filename = filepath.Base(filename)
 
 	// Double-check for path traversal in the base filename
@@ -248,6 +278,15 @@ func (tm *TransferManager) sanitizeFilename(filename string) (string, error) {
 		return "unnamed", nil
 	}
 
+	// Check length limits to prevent denial of service.
+	// Count runes (characters), not bytes, so multi-byte UTF-8 filenames
+	// are not incorrectly rejected.
+	const maxFilenameLength = 255
+	runeCount := utf8.RuneCountInString(result)
+	if runeCount > maxFilenameLength {
+		return "", fmt.Errorf("filename too long: %d characters (max %d)", runeCount, maxFilenameLength)
+	}
+
 	return result, nil
 }
 
@@ -263,6 +302,17 @@ func (tm *TransferManager) validateTargetPath(targetPath, targetRoot string) err
 	cleanPath := filepath.Clean(targetPath)
 	if !filepath.IsAbs(cleanPath) {
 		cleanPath = "/" + cleanPath
+	}
+
+	// Handle the case where targetPath equals targetRoot exactly
+	if cleanPath == cleanRoot {
+		return nil
+	}
+
+	// Add trailing separator to root to ensure proper prefix matching.
+	// This prevents /root from matching /root2 or /root-foo.
+	if !strings.HasSuffix(cleanRoot, "/") {
+		cleanRoot += "/"
 	}
 
 	// Check if the target path is within the target root
