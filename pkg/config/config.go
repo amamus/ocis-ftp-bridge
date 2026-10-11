@@ -150,10 +150,12 @@ func New() *Config {
 			Listen:          ":2121",
 			Passive:         PassiveConfig{MinPort: 40000, MaxPort: 50000},
 			MaxConnections:  100,
-			// TLS is disabled by default for development convenience
-			// Production deployments should enable TLS explicitly
+			// TLS is enabled by default for security
+			// Plain FTP (unencrypted) is insecure and should be avoided
 			TLS: TLSConfig{
-				Enabled: false,
+				Enabled: true,
+				Cert:    "", // Will be validated at startup if enabled
+				Key:     "", // Will be validated at startup if enabled
 			},
 		},
 		OCIS: OCISConfig{
