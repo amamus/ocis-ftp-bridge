@@ -2,7 +2,12 @@
 package config
 
 import (
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/rsa"
 	"crypto/subtle"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -218,6 +223,81 @@ func New() *Config {
 	}
 }
 
+// checkForPlaintextCredentials scans the config file for potential plaintext credentials
+// This is a best-effort check to warn users about potential security issues
+func checkForPlaintextCredentials(filename string) error {
+	// Read the raw file content
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return nil // Can't read, skip check
+	}
+	
+	content := string(data)
+	
+	// Check for common patterns that might indicate plaintext passwords
+	// These are heuristic checks and may have false positives
+	passwordPatterns := []string{
+		"password:",
+		"password: ",
+		"passwd:",
+		"passwd: ",
+		"secret:",
+		"secret: ",
+		"token:",
+		"token: ",
+	}
+	
+	// Check for plaintext passwords that look like common passwords
+	// These are weak checks but can catch obvious issues
+	commonPasswords := []string{
+		"password",
+		"123456",
+		"qwerty",
+		"admin",
+		"letmein",
+		"welcome",
+		"secret",
+		"changeme",
+	}
+	
+	for _, pattern := range passwordPatterns {
+		if strings.Contains(content, pattern) {
+			// Check if it's followed by what looks like a plaintext password
+			lines := strings.Split(content, "\n")
+			for _, line := range lines {
+				if strings.Contains(line, pattern) {
+					// Extract the value after the pattern
+					parts := strings.SplitN(line, ":", 2)
+					if len(parts) > 1 {
+						value := strings.TrimSpace(parts[1])
+						// Skip if it looks like a hash (starts with $)
+						if strings.HasPrefix(value, "$") {
+							continue
+						}
+						// Skip if it's empty or in quotes (might be a reference)
+						if value == "" || strings.HasPrefix(value, "\"") || strings.HasPrefix(value, "'") {
+							continue
+						}
+						// Check if it matches a common password
+						for _, commonPW := range commonPasswords {
+							if strings.EqualFold(value, commonPW) {
+								return fmt.Errorf("potential plaintext password detected: %s", pattern)
+							}
+						}
+						// Check if it looks like a base64 token (common for oCIS tokens)
+						if len(value) > 20 && !strings.ContainsAny(value, " \t\n") {
+							// This might be a token - warn about it
+							return fmt.Errorf("potential plaintext credential detected: %s", pattern)
+						}
+					}
+				}
+			}
+		}
+	}
+	
+	return nil
+}
+
 func LoadFile(filename string) (*Config, error) {
 	return LoadFileWithEnv(filename, os.LookupEnv)
 }
@@ -226,6 +306,15 @@ func LoadFileWithEnv(filename string, lookupEnv func(string) (string, bool)) (*C
 	if strings.TrimSpace(filename) == "" {
 		return nil, errors.New("configuration file path is required")
 	}
+
+	// Security check: warn if config file contains potential plaintext passwords.
+	// This must run before KnownFields(true) decoding so that unknown credential
+	// keys (e.g. "password:") are caught by the scanner rather than silently
+	// rejected by strict field validation before the check can run.
+	if err := checkForPlaintextCredentials(filename); err != nil {
+		slog.Warn("Potential security issue in configuration", "file", filename, "error", err)
+	}
+
 	f, err := os.Open(filename)
 	if err != nil {
 		return nil, fmt.Errorf("open configuration %q: %w", filename, err)
@@ -306,8 +395,21 @@ func (c *Config) validateWithEnv(lookupEnv func(string) (string, bool)) error {
 		}
 		seen[account.Username] = struct{}{}
 
+		// Validate password hash
 		if _, err := parseArgon2ID(account.PasswordHash); err != nil {
 			return fmt.Errorf("%s.password_hash: %w", prefix, err)
+		}
+		
+		// Check for known example/test password hashes
+		// These are commonly used in examples and should not be used in production
+	exampleHashes := []string{
+			"$argon2id$v=19$m=65536,t=3,p=1$MDEyMzQ1Njc4OWFiY2RlZg$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+			"$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJC1OeqncgJ2almHUfLnhtRTVrjD8zGQ",
+		}
+		for _, exampleHash := range exampleHashes {
+			if strings.Contains(account.PasswordHash, exampleHash) {
+				return fmt.Errorf("%s.password_hash: example/default hash detected. Generate a unique hash for production use", prefix)
+			}
 		}
 		if strings.TrimSpace(account.OCIS.Username) == "" {
 			return fmt.Errorf("%s.ocis.username is required", prefix)
@@ -401,6 +503,75 @@ func (c *Config) validateOCIS() error {
 			return fmt.Errorf("%s %q must be an absolute http(s) URL", name, raw)
 		}
 	}
+	return nil
+}
+
+// ValidateTLSConfig validates TLS configuration at startup
+// This ensures that TLS certificates are valid before the server starts
+func (c *Config) ValidateTLSConfig() error {
+	if !c.Server.TLS.Enabled {
+		// TLS is not enabled, nothing to validate
+		return nil
+	}
+
+	// Check if certificate and key files are specified
+	if strings.TrimSpace(c.Server.TLS.Cert) == "" {
+		return fmt.Errorf("server.tls.cert is required when TLS is enabled")
+	}
+	if strings.TrimSpace(c.Server.TLS.Key) == "" {
+		return fmt.Errorf("server.tls.key is required when TLS is enabled")
+	}
+
+	// Check if certificate file exists and is readable
+	if _, err := os.Stat(c.Server.TLS.Cert); os.IsNotExist(err) {
+		return fmt.Errorf("TLS certificate file not found: %s", c.Server.TLS.Cert)
+	}
+	if _, err := os.Stat(c.Server.TLS.Key); os.IsNotExist(err) {
+		return fmt.Errorf("TLS key file not found: %s", c.Server.TLS.Key)
+	}
+
+	// Load and validate the certificate
+	cert, err := tls.LoadX509KeyPair(c.Server.TLS.Cert, c.Server.TLS.Key)
+	if err != nil {
+		return fmt.Errorf("failed to load TLS certificate/key pair: %w", err)
+	}
+
+	// Parse the certificate to check for issues
+	x509Cert, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return fmt.Errorf("failed to parse TLS certificate: %w", err)
+	}
+
+	// Validate certificate expiration
+	now := time.Now()
+	if now.After(x509Cert.NotAfter) {
+		return fmt.Errorf("TLS certificate expired on %s", x509Cert.NotAfter.Format(time.RFC3339))
+	}
+	if now.Before(x509Cert.NotBefore) {
+		return fmt.Errorf("TLS certificate not yet valid (valid from %s)", x509Cert.NotBefore.Format(time.RFC3339))
+	}
+
+	// Validate certificate key strength
+	switch pubKey := x509Cert.PublicKey.(type) {
+	case *rsa.PublicKey:
+		// rsa.PublicKey.Size() returns bytes, not bits; use N.BitLen() for bits.
+		keyBits := pubKey.N.BitLen()
+		if keyBits < 2048 {
+			return fmt.Errorf("TLS certificate RSA key too weak: %d bits (minimum 2048)", keyBits)
+		}
+	case *ecdsa.PublicKey:
+		// Check ECDSA curve strength
+		// P-256, P-384, and P-521 are acceptable
+		curveName := pubKey.Curve.Params().Name
+		if curveName != "P-256" && curveName != "P-384" && curveName != "P-521" {
+			return fmt.Errorf("TLS certificate uses unsupported ECDSA curve: %s", curveName)
+		}
+	case ed25519.PublicKey:
+		// Ed25519 is acceptable
+	default:
+		return fmt.Errorf("TLS certificate uses unsupported public key type: %T", pubKey)
+	}
+
 	return nil
 }
 
