@@ -5,9 +5,11 @@ server:
     max_port: 30020
     public_ip: ""
   tls:
-    enabled: false
-    cert: /etc/ocis-ftp/tls.crt
-    key: /etc/ocis-ftp/tls.key
+    # TLS is enabled by default for security
+    # Plain FTP (unencrypted) is insecure and exposes credentials and data
+    enabled: true
+    cert: /etc/ocis-ftp/tls.crt  # Path to TLS certificate
+    key: /etc/ocis-ftp/tls.key   # Path to TLS private key
 
 ocis:
   url: https://cloud.example.com
@@ -28,10 +30,17 @@ http:
 
 accounts:
   - username: reception
-    # Example-only syntactically valid Argon2id PHC value. Generate your own hash.
-    password_hash: "$argon2id$v=19$m=65536,t=3,p=1$MDEyMzQ1Njc4OWFiY2RlZg$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    # Password hash (Argon2id PHC format).
+    # NEVER use plaintext passwords. Generate hashes using:
+    #   htpasswd -B -C 12 -i -d password | tr -d '\n'
+    # Or: go run cmd/hash-password/main.go
+    # Replace this with your own generated hash!
+    password_hash: "$argon2id$v=19$m=65536,t=3,p=1$gK3n5v9Bw5Fh8Lm2NqPj7H$CWQ2EeT5RfYhNjDfGvXpBnMqLkJhGfDs"
     ocis:
       username: scanner-service
+      # oCIS App Token - use environment variable for security
+      # Set the environment variable before starting the service:
+      #   export OCIS_FTP_RECEPTION_TOKEN="your-app-token-here"
       app_token_env: OCIS_FTP_RECEPTION_TOKEN
     target:
       drive_id: ""

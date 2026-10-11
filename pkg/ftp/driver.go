@@ -190,6 +190,11 @@ func (d *BridgeDriver) OnLogout(client ftpserver.ClientContext) error {
 
 // GetSettings returns the server settings.
 func (d *BridgeDriver) GetSettings() (*ftpserver.Settings, error) {
+	// Log warning if plain FTP is enabled (insecure)
+	if !d.cfg.Server.TLS.Enabled {
+		d.obs.Log("warn", "Plain FTP is enabled! Credentials and data will be transmitted in cleartext. This is a security risk. Enable TLS for production use.")
+	}
+	
 	settings := &ftpserver.Settings{
 		ListenAddr:       d.cfg.Server.Listen,
 		PublicHost:      d.cfg.Server.Passive.PublicIP,

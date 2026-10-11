@@ -43,6 +43,12 @@ func New(cfg *config.Config, obs observability.Client) (Server, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidConfig, err)
 	}
+	
+	// Validate TLS configuration at startup
+	// This ensures that if TLS is enabled, the certificates are valid
+	if err := cfg.ValidateTLSConfig(); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidConfig, err)
+	}
 
 	spoolMgr, err := initializeSpool(cfg)
 	if err != nil {
@@ -51,6 +57,17 @@ func New(cfg *config.Config, obs observability.Client) (Server, error) {
 
 	if err := obs.Start(); err != nil {
 		return nil, fmt.Errorf("failed to start observability: %w", err)
+	}
+
+	// Validate TLS configuration at startup
+	// This ensures that if TLS is enabled, the certificates are valid
+	if err := cfg.ValidateTLSConfig(); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidConfig, err)
+	}
+	
+	// Warn if plain FTP is enabled (security risk)
+	if !cfg.Server.TLS.Enabled {
+		obs.Log("warn", "Plain FTP is enabled! Credentials and data will be transmitted in cleartext. This is a security risk. Enable TLS for production use.")
 	}
 
 	// Create graph client with placeholder credentials (will be configured per-account)
