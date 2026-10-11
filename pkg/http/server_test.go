@@ -11,7 +11,10 @@ import (
 
 func TestOperationsServer_Creation(t *testing.T) {
 	t.Run("create server with default address", func(t *testing.T) {
-		server := NewOperationsServer(":9200", nil)
+		server, err := NewOperationsServer(":9200", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if server == nil {
 			t.Fatal("Expected non-nil server")
 		}
@@ -22,7 +25,10 @@ func TestOperationsServer_Creation(t *testing.T) {
 	})
 
 	t.Run("create server with random port", func(t *testing.T) {
-		server := NewOperationsServer(":0", nil)
+		server, err := NewOperationsServer(":0", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if server == nil {
 			t.Fatal("Expected non-nil server")
 		}
@@ -31,7 +37,10 @@ func TestOperationsServer_Creation(t *testing.T) {
 
 func TestOperationsServer_StartStop(t *testing.T) {
 	t.Run("start and stop without error", func(t *testing.T) {
-		server := NewOperationsServer(":0", nil)
+		server, err := NewOperationsServer(":0", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -65,7 +74,10 @@ func TestOperationsServer_StartStop(t *testing.T) {
 	})
 
 	t.Run("double start returns error", func(t *testing.T) {
-		server := NewOperationsServer(":0", nil)
+		server, err := NewOperationsServer(":0", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -79,14 +91,17 @@ func TestOperationsServer_StartStop(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 
 		// Try to start again
-		err := server.Run(ctx)
+		err = server.Run(ctx)
 		if err == nil {
 			t.Error("Expected error when starting server twice")
 		}
 	})
 
 	t.Run("double stop is safe", func(t *testing.T) {
-		server := NewOperationsServer(":0", nil)
+		server, err := NewOperationsServer(":0", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -113,7 +128,10 @@ func TestOperationsServer_StartStop(t *testing.T) {
 
 func TestOperationsServer_HealthState(t *testing.T) {
 	t.Run("health state management", func(t *testing.T) {
-		server := NewOperationsServer(":0", nil)
+		server, err := NewOperationsServer(":0", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		// Initially healthy
 		if !server.IsHealthy() {
@@ -134,7 +152,10 @@ func TestOperationsServer_HealthState(t *testing.T) {
 	})
 
 	t.Run("ready state management", func(t *testing.T) {
-		server := NewOperationsServer(":0", nil)
+		server, err := NewOperationsServer(":0", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		// Initially ready
 		if !server.IsReady() {
@@ -157,7 +178,10 @@ func TestOperationsServer_HealthState(t *testing.T) {
 
 func TestOperationsServer_Metrics(t *testing.T) {
 	t.Run("metrics methods do not panic", func(t *testing.T) {
-		server := NewOperationsServer(":0", nil)
+		server, err := NewOperationsServer(":0", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		// These should not panic
 		server.IncrementFTPSessionTotal("success")
@@ -242,15 +266,32 @@ func TestBasicAuthMiddleware(t *testing.T) {
 		handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		}))
-		
+
 		req := httptest.NewRequest("GET", "/healthz", nil)
 		// No Authorization header, but should bypass for healthz
-		
+
 		rr := httptest.NewRecorder()
 		handler.ServeHTTP(rr, req)
-		
+
 		if rr.Code != http.StatusOK {
 			t.Errorf("Expected status %d for healthz, got %d", http.StatusOK, rr.Code)
+		}
+	})
+
+	t.Run("readyz endpoint bypasses auth", func(t *testing.T) {
+		middleware := BasicAuthMiddleware("testuser", "testpass")
+		handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		req := httptest.NewRequest("GET", "/readyz", nil)
+		// No Authorization header, but should bypass for readyz (Kubernetes readiness probe)
+
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Errorf("Expected status %d for readyz, got %d", http.StatusOK, rr.Code)
 		}
 	})
 }
