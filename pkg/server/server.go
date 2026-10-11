@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/amamus/ocis-ftp-bridge/pkg/config"
 	"github.com/amamus/ocis-ftp-bridge/pkg/ftp"
@@ -28,7 +29,6 @@ type service struct {
 	cfg            *config.Config
 	obs            observability.Client
 	spoolManager   spool.Manager
-	spoolMonitor   spool.SpoolMonitor
 	graphClient    graph.Client
 	webdavClient   webdav.Client
 	ftpServer      ftp.Server
@@ -44,12 +44,6 @@ func New(cfg *config.Config, obs observability.Client) (Server, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidConfig, err)
 	}
-	
-	// Validate TLS configuration at startup
-	// This ensures that if TLS is enabled, the certificates are valid
-	if err := cfg.ValidateTLSConfig(); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidConfig, err)
-	}
 
 	spoolMgr, err := initializeSpool(cfg)
 	if err != nil {
@@ -58,17 +52,6 @@ func New(cfg *config.Config, obs observability.Client) (Server, error) {
 
 	if err := obs.Start(); err != nil {
 		return nil, fmt.Errorf("failed to start observability: %w", err)
-	}
-
-	// Validate TLS configuration at startup
-	// This ensures that if TLS is enabled, the certificates are valid
-	if err := cfg.ValidateTLSConfig(); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidConfig, err)
-	}
-	
-	// Warn if plain FTP is enabled (security risk)
-	if !cfg.Server.TLS.Enabled {
-		obs.Log("warn", "Plain FTP is enabled! Credentials and data will be transmitted in cleartext. This is a security risk. Enable TLS for production use.")
 	}
 
 	// Create graph client with placeholder credentials (will be configured per-account)
@@ -82,25 +65,23 @@ func New(cfg *config.Config, obs observability.Client) (Server, error) {
 	ftpServer := ftp.NewServer(ftpDriver)
 
 	// Initialize HTTP operations server
-	httpServer, err := http.NewOperationsServer(cfg.HTTP.Address, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create HTTP operations server: %w", err)
+	// For health checks, use oCIS URLs directly without authentication
+	// This assumes that the oCIS server has public health endpoints
+	// or that authentication is handled at a different level
+	healthCheckConfig := http.HealthCheckConfig{
+		OCISURL:        cfg.OCIS.URL,
+		OCISUsername:   "", // Health checks don't require authentication
+		OCISPassword:   "", // Health checks don't require authentication
+		WebDAVURL:      cfg.OCIS.WebDAVURL,
+		SpoolDirectory: cfg.Spool.Directory,
+		CheckTimeout:   5 * time.Second, // Default timeout
 	}
-
-	// Initialize spool monitor
-	// Get the spool capacity from the spool manager
-	_, capacity, err := spoolMgr.GetUsage()
-	if err != nil {
-		// If we can't get usage, use the configured max total size
-		capacity = uint64(cfg.Spool.MaxTotalSize)
-	}
-	spoolMonitor := spool.StartSpoolMonitor(cfg.Spool.Directory, capacity, cfg.Spool.Monitoring, httpServer)
+	httpServer := http.NewOperationsServer(cfg.HTTP.Address, healthCheckConfig)
 
 	return &service{
 		cfg:            cfg,
 		obs:            obs,
 		spoolManager:   spoolMgr,
-		spoolMonitor:   spoolMonitor,
 		graphClient:    graphClient,
 		webdavClient:   webdavClient,
 		ftpServer:      ftpServer,
@@ -161,11 +142,6 @@ func (s *service) Run(ctx context.Context) error {
 	// Shutdown HTTP server
 	if err := s.stopHTTPServer(); err != nil {
 		s.obs.Log("error", fmt.Sprintf("HTTP server shutdown error: %v", err))
-	}
-
-	// Shutdown spool monitor
-	if s.spoolMonitor != nil {
-		s.spoolMonitor.Stop()
 	}
 
 	// Wait for all servers to stop

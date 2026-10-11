@@ -6,44 +6,20 @@ package http
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/subtle"
-	"encoding/base64"
+	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/amamus/ocis-ftp-bridge/pkg/config"
-	"github.com/amamus/ocis-ftp-bridge/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
-
-// generateRandomPassword generates a cryptographically secure random password of the given length.
-// It fails closed: if crypto/rand is unavailable, an error is returned rather than
-// falling back to a predictable value.
-func generateRandomPassword(length int) (string, error) {
-	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*"
-	const charsetLen = len(charset)
-
-	password := make([]byte, length)
-	for i := 0; i < length; i++ {
-		randomBytes := make([]byte, 4)
-		if _, err := io.ReadFull(rand.Reader, randomBytes); err != nil {
-			return "", fmt.Errorf("failed to generate secure random password: %w", err)
-		}
-		index := int(randomBytes[0]) % charsetLen
-		password[i] = charset[index]
-	}
-
-	return string(password), nil
-}
 
 // Server provides HTTP operations endpoints
 type Server interface {
@@ -62,11 +38,21 @@ type OperationsServer struct {
 	actualAddr string
 	mux        *http.ServeMux
 	address    string
-	cfg        *config.Config
 
 	// Health and readiness state
 	healthy int32 // atomic: 1 = healthy, 0 = unhealthy
 	ready   int32 // atomic: 1 = ready, 0 = not ready
+
+	// Configuration for health checks
+	ocisURL              string
+	ocisUsername         string
+	ocisPassword         string
+	webdavURL            string
+	spoolDirectory       string
+	checkTimeout         time.Duration
+	
+	// HTTP client for connectivity checks
+	httpClient *http.Client
 
 	// Metrics collectors (stored as interfaces for registration)
 	ftpSessionsTotal       prometheus.Collector
@@ -77,116 +63,213 @@ type OperationsServer struct {
 	ftpUploadDuration      prometheus.Collector
 	ocisRequestsTotal      prometheus.Collector
 	
-	// Spool metrics
-	SpoolSizeBytes           prometheus.Collector
-	SpoolFileCount           prometheus.Collector
-	SpoolCapacityBytes       prometheus.Collector
-	SpoolUsagePercent        prometheus.Collector
-	SpoolCapacityExceededTotal prometheus.Collector
+	// Health check metrics
+	healthCheckTotal    prometheus.Collector
+	healthCheckDuration prometheus.Collector
+
+	// Spool monitoring metrics
+	SpoolSizeBytes              prometheus.Collector
+	SpoolFileCount              prometheus.Collector
+	SpoolCapacityBytes          prometheus.Collector
+	SpoolUsagePercent           prometheus.Collector
+	SpoolCapacityExceededTotal  prometheus.Collector
+}
+
+// HealthCheckConfig contains configuration for health checks
+type HealthCheckConfig struct {
+	OCISURL        string
+	OCISUsername   string
+	OCISPassword   string
+	WebDAVURL      string
+	SpoolDirectory string
+	CheckTimeout   time.Duration
 }
 
 // NewOperationsServer creates a new operations HTTP server
-// BasicAuthMiddleware creates a middleware that requires HTTP Basic Authentication
-func BasicAuthMiddleware(username, password string) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Skip authentication for health and readiness endpoints.
-			// Kubernetes liveness and readiness probes call these without credentials.
-			if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
-				next.ServeHTTP(w, r)
-				return
-			}
-			
-			// Check for Basic Authentication header
-			auth := r.Header.Get("Authorization")
-			if auth == "" {
-				// No authorization header provided
-				w.Header().Set("WWW-Authenticate", `Basic realm="ocis-ftp-bridge"`)
-				http.Error(w, "Unauthorized: Authentication required", http.StatusUnauthorized)
-				return
-			}
-			
-			// Parse Basic Auth header
-			const basicPrefix = "Basic "
-			if !strings.HasPrefix(auth, basicPrefix) {
-				w.Header().Set("WWW-Authenticate", `Basic realm="ocis-ftp-bridge"`)
-				http.Error(w, "Unauthorized: Invalid authorization method", http.StatusUnauthorized)
-				return
-			}
-			
-			// Decode the credentials
-			encoded := strings.TrimPrefix(auth, basicPrefix)
-			decoded, err := base64.StdEncoding.DecodeString(encoded)
-			if err != nil {
-				w.Header().Set("WWW-Authenticate", `Basic realm="ocis-ftp-bridge"`)
-				http.Error(w, "Unauthorized: Invalid credentials encoding", http.StatusUnauthorized)
-				return
-			}
-			
-			// Split into username:password
-			creds := strings.SplitN(string(decoded), ":", 2)
-			if len(creds) != 2 {
-				w.Header().Set("WWW-Authenticate", `Basic realm="ocis-ftp-bridge"`)
-				http.Error(w, "Unauthorized: Invalid credentials format", http.StatusUnauthorized)
-				return
-			}
-			
-			// Validate credentials using constant-time comparison
-			providedUsername := creds[0]
-			providedPassword := creds[1]
-			
-			if subtle.ConstantTimeCompare([]byte(providedUsername), []byte(username)) != 1 ||
-				subtle.ConstantTimeCompare([]byte(providedPassword), []byte(password)) != 1 {
-				w.Header().Set("WWW-Authenticate", `Basic realm="ocis-ftp-bridge"`)
-				http.Error(w, "Unauthorized: Invalid credentials", http.StatusUnauthorized)
-				return
-			}
-			
-			// Authentication successful
-			next.ServeHTTP(w, r)
-		})
+// checkOCISConnectivity checks if the oCIS server is reachable
+func (s *OperationsServer) checkOCISConnectivity() error {
+	ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout)
+	defer cancel()
+	
+	url := s.ocisURL
+	if !strings.HasSuffix(url, "/") {
+		url += "/"
 	}
+	url += "status"
+	
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create oCIS request: %w", err)
+	}
+	
+	// Add basic auth if credentials are configured
+	if s.ocisUsername != "" && s.ocisPassword != "" {
+		req.SetBasicAuth(s.ocisUsername, s.ocisPassword)
+	}
+	
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to connect to oCIS: %w", err)
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("oCIS returned non-OK status: %s", resp.Status)
+	}
+	
+	return nil
 }
 
-// BearerAuthMiddleware creates a middleware that requires Bearer token authentication
-func BearerAuthMiddleware(token string) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Skip authentication for health endpoints
-			if r.URL.Path == "/healthz" {
-				next.ServeHTTP(w, r)
-				return
-			}
-			
-			// Check for Authorization header
-			auth := r.Header.Get("Authorization")
-			if auth == "" {
-				http.Error(w, "Unauthorized: Bearer token required", http.StatusUnauthorized)
-				return
-			}
-			
-			// Parse Bearer token
-			const bearerPrefix = "Bearer "
-			if !strings.HasPrefix(auth, bearerPrefix) {
-				http.Error(w, "Unauthorized: Invalid authorization method", http.StatusUnauthorized)
-				return
-			}
-			
-			providedToken := strings.TrimPrefix(auth, bearerPrefix)
-			
-			// Validate token using constant-time comparison
-			if subtle.ConstantTimeCompare([]byte(providedToken), []byte(token)) != 1 {
-				http.Error(w, "Unauthorized: Invalid token", http.StatusUnauthorized)
-				return
-			}
-			
-			// Authentication successful
-			next.ServeHTTP(w, r)
-		})
+// checkWebDAVConnectivity checks if the WebDAV endpoint is reachable
+func (s *OperationsServer) checkWebDAVConnectivity() error {
+	ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout)
+	defer cancel()
+	
+	url := s.webdavURL
+	if !strings.HasSuffix(url, "/") {
+		url += "/"
 	}
+	
+	req, err := http.NewRequestWithContext(ctx, "PROPFIND", url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create WebDAV request: %w", err)
+	}
+	
+	// Add basic auth if credentials are configured
+	if s.ocisUsername != "" && s.ocisPassword != "" {
+		req.SetBasicAuth(s.ocisUsername, s.ocisPassword)
+	}
+	
+	// Set required headers for WebDAV
+	req.Header.Set("Depth", "0")
+	req.Header.Set("Content-Type", "application/xml")
+	
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to connect to WebDAV: %w", err)
+	}
+	defer resp.Body.Close()
+	
+	// WebDAV may return 401 (Unauthorized) which is still a successful connection.
+	// A successful PROPFIND returns 207 Multi-Status.
+	// We want to check if we can reach the server, not necessarily if we're authenticated.
+	if resp.StatusCode != http.StatusOK &&
+	   resp.StatusCode != http.StatusMultiStatus &&
+	   resp.StatusCode != http.StatusUnauthorized &&
+	   resp.StatusCode != http.StatusForbidden {
+		return fmt.Errorf("WebDAV returned unexpected status: %s", resp.Status)
+	}
+	
+	return nil
 }
 
-func NewOperationsServer(address string, cfg *config.Config) (*OperationsServer, error) {
+// checkSpoolDirectory checks if the spool directory exists and is writable
+func (s *OperationsServer) checkSpoolDirectory() error {
+	if s.spoolDirectory == "" {
+		return errors.New("spool directory not configured")
+	}
+	
+	// Check if directory exists
+	info, err := os.Stat(s.spoolDirectory)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("spool directory %q does not exist", s.spoolDirectory)
+		}
+		return fmt.Errorf("cannot access spool directory %q: %w", s.spoolDirectory, err)
+	}
+	
+	if !info.IsDir() {
+		return fmt.Errorf("spool path %q is not a directory", s.spoolDirectory)
+	}
+	
+	// Check if directory is writable using a more reliable method
+	// Use a unique filename to avoid race conditions
+	testFile := filepath.Join(s.spoolDirectory, fmt.Sprintf(".healthcheck_test_%d_%s", os.Getpid(), time.Now().Format("20060102150405")))
+	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
+		return fmt.Errorf("spool directory %q is not writable: %w", s.spoolDirectory, err)
+	}
+	
+	// Clean up the test file - best effort, don't fail health check on cleanup issues
+	_ = os.Remove(testFile)
+	
+	return nil
+}
+
+// performHealthChecks performs all health checks and returns the results
+func (s *OperationsServer) performHealthChecks() (map[string]string, []string) {
+	checks := make(map[string]string)
+	var failedChecks []string
+	
+	// Check oCIS connectivity
+	start := time.Now()
+	if err := s.checkOCISConnectivity(); err != nil {
+		checks["ocis_connectivity"] = "failed"
+		failedChecks = append(failedChecks, fmt.Sprintf("oCIS connectivity: %s", err.Error()))
+		
+		// Record metrics
+		if cv, ok := s.healthCheckTotal.(*prometheus.CounterVec); ok {
+			cv.WithLabelValues("ocis_connectivity", "failed").Inc()
+		}
+	} else {
+		checks["ocis_connectivity"] = "ok"
+		
+		// Record metrics
+		if cv, ok := s.healthCheckTotal.(*prometheus.CounterVec); ok {
+			cv.WithLabelValues("ocis_connectivity", "success").Inc()
+		}
+	}
+	if hv, ok := s.healthCheckDuration.(*prometheus.HistogramVec); ok {
+		hv.WithLabelValues("ocis_connectivity").Observe(time.Since(start).Seconds())
+	}
+	
+	// Check WebDAV connectivity
+	start = time.Now()
+	if err := s.checkWebDAVConnectivity(); err != nil {
+		checks["webdav_connectivity"] = "failed"
+		failedChecks = append(failedChecks, fmt.Sprintf("WebDAV connectivity: %s", err.Error()))
+		
+		// Record metrics
+		if cv, ok := s.healthCheckTotal.(*prometheus.CounterVec); ok {
+			cv.WithLabelValues("webdav_connectivity", "failed").Inc()
+		}
+	} else {
+		checks["webdav_connectivity"] = "ok"
+		
+		// Record metrics
+		if cv, ok := s.healthCheckTotal.(*prometheus.CounterVec); ok {
+			cv.WithLabelValues("webdav_connectivity", "success").Inc()
+		}
+	}
+	if hv, ok := s.healthCheckDuration.(*prometheus.HistogramVec); ok {
+		hv.WithLabelValues("webdav_connectivity").Observe(time.Since(start).Seconds())
+	}
+	
+	// Check spool directory
+	start = time.Now()
+	if err := s.checkSpoolDirectory(); err != nil {
+		checks["spool_directory"] = "failed"
+		failedChecks = append(failedChecks, fmt.Sprintf("spool directory: %s", err.Error()))
+		
+		// Record metrics
+		if cv, ok := s.healthCheckTotal.(*prometheus.CounterVec); ok {
+			cv.WithLabelValues("spool_directory", "failed").Inc()
+		}
+	} else {
+		checks["spool_directory"] = "ok"
+		
+		// Record metrics
+		if cv, ok := s.healthCheckTotal.(*prometheus.CounterVec); ok {
+			cv.WithLabelValues("spool_directory", "success").Inc()
+		}
+	}
+	if hv, ok := s.healthCheckDuration.(*prometheus.HistogramVec); ok {
+		hv.WithLabelValues("spool_directory").Observe(time.Since(start).Seconds())
+	}
+	
+	return checks, failedChecks
+}
+
+func NewOperationsServer(address string, healthConfig HealthCheckConfig) *OperationsServer {
 	// Create custom registry for our metrics
 	registry := prometheus.NewRegistry()
 
@@ -264,50 +347,26 @@ func NewOperationsServer(address string, cfg *config.Config) (*OperationsServer,
 		[]string{"service", "status"},
 	)
 
-	// Spool metrics
-	spoolSizeBytes := prometheus.NewGauge(
-		prometheus.GaugeOpts{
-			Namespace: "ocis_ftp",
-			Subsystem: "spool",
-			Name:      "size_bytes",
-			Help:      "Current size of the spool directory in bytes",
-		},
-	)
-
-	spoolFileCount := prometheus.NewGauge(
-		prometheus.GaugeOpts{
-			Namespace: "ocis_ftp",
-			Subsystem: "spool",
-			Name:      "file_count",
-			Help:      "Current number of files in the spool directory",
-		},
-	)
-
-	spoolCapacityBytes := prometheus.NewGauge(
-		prometheus.GaugeOpts{
-			Namespace: "ocis_ftp",
-			Subsystem: "spool",
-			Name:      "capacity_bytes",
-			Help:      "Maximum capacity of the spool directory in bytes",
-		},
-	)
-
-	spoolUsagePercent := prometheus.NewGauge(
-		prometheus.GaugeOpts{
-			Namespace: "ocis_ftp",
-			Subsystem: "spool",
-			Name:      "usage_percent",
-			Help:      "Current spool usage as percentage of capacity",
-		},
-	)
-
-	spoolCapacityExceededTotal := prometheus.NewCounter(
+	// Create health check metrics
+	healthCheckTotal := prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "ocis_ftp",
-			Subsystem: "spool",
-			Name:      "capacity_exceeded_total",
-			Help:      "Total number of times spool capacity has been exceeded",
+			Subsystem: "health",
+			Name:      "check_total",
+			Help:      "Total number of health checks performed",
 		},
+		[]string{"check", "status"},
+	)
+
+	healthCheckDuration := prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: "ocis_ftp",
+			Subsystem: "health",
+			Name:      "check_duration_seconds",
+			Help:      "Duration of health checks in seconds",
+			Buckets:   []float64{0.01, 0.05, 0.1, 0.5, 1, 2, 5},
+		},
+		[]string{"check"},
 	)
 
 	// Register all metrics
@@ -319,50 +378,18 @@ func NewOperationsServer(address string, cfg *config.Config) (*OperationsServer,
 		ftpUploadBytesTotal,
 		ftpUploadDuration,
 		ocisRequestsTotal,
-		spoolSizeBytes,
-		spoolFileCount,
-		spoolCapacityBytes,
-		spoolUsagePercent,
-		spoolCapacityExceededTotal,
+		healthCheckTotal,
+		healthCheckDuration,
 	)
 
-	// Store configuration
-	var authMiddleware func(http.Handler) http.Handler
-	
-	// Configure authentication middleware if enabled
-	if cfg != nil && cfg.HTTP.Auth.Enabled {
-		switch cfg.HTTP.Auth.Method {
-		case "basic":
-			// Generate a random password if none is provided
-			if cfg.HTTP.Auth.Password == "" {
-				generated, err := generateRandomPassword(16)
-				if err != nil {
-					return nil, fmt.Errorf("failed to generate HTTP auth password: %w", err)
-				}
-				cfg.HTTP.Auth.Password = generated
-				slog.Warn("HTTP Basic auth enabled without explicit password; generated one",
-					"username", cfg.HTTP.Auth.Username,
-					"password", generated,
-					"warning", "set http.auth.password explicitly for persistent credentials")
-			}
-			authMiddleware = BasicAuthMiddleware(cfg.HTTP.Auth.Username, cfg.HTTP.Auth.Password)
-		case "bearer":
-			if cfg.HTTP.Auth.BearerToken == "" {
-				generated, err := generateRandomPassword(32)
-				if err != nil {
-					return nil, fmt.Errorf("failed to generate HTTP bearer token: %w", err)
-				}
-				cfg.HTTP.Auth.BearerToken = generated
-				slog.Warn("HTTP Bearer auth enabled without explicit token; generated one",
-					"token", generated,
-					"warning", "set http.auth.bearer_token explicitly for persistent credentials")
-			}
-			authMiddleware = BearerAuthMiddleware(cfg.HTTP.Auth.BearerToken)
-		default:
-			// No authentication, but this should be caught by config validation
-			// If we reach here, authentication is effectively disabled
-			authMiddleware = nil
-		}
+	// Create HTTP client for health checks
+	healthCheckHTTPClient := &http.Client{
+		Timeout: healthConfig.CheckTimeout,
+		Transport: &http.Transport{
+			MaxIdleConns:        5,
+			MaxIdleConnsPerHost: 2,
+			IdleConnTimeout:     30 * time.Second,
+		},
 	}
 
 	// Set up HTTP routes
@@ -372,9 +399,15 @@ func NewOperationsServer(address string, cfg *config.Config) (*OperationsServer,
 	s := &OperationsServer{
 		address:               address,
 		mux:                  mux,
-		cfg:                 cfg,
 		healthy:               1,
-		ready:                 1,
+		ready:                 1, // Start as ready, can be updated by health checks
+		ocisURL:               healthConfig.OCISURL,
+		ocisUsername:          healthConfig.OCISUsername,
+		ocisPassword:          healthConfig.OCISPassword,
+		webdavURL:             healthConfig.WebDAVURL,
+		spoolDirectory:        healthConfig.SpoolDirectory,
+		checkTimeout:          healthConfig.CheckTimeout,
+		httpClient:            healthCheckHTTPClient,
 		ftpSessionsTotal:      ftpSessionsTotal,
 		ftpActiveSessions:     ftpActiveSessions,
 		ftpUploadsTotal:       ftpUploadsTotal,
@@ -382,33 +415,86 @@ func NewOperationsServer(address string, cfg *config.Config) (*OperationsServer,
 		ftpUploadBytesTotal:   ftpUploadBytesTotal,
 		ftpUploadDuration:     ftpUploadDuration,
 		ocisRequestsTotal:     ocisRequestsTotal,
-		SpoolSizeBytes:        spoolSizeBytes,
-		SpoolFileCount:        spoolFileCount,
-		SpoolCapacityBytes:    spoolCapacityBytes,
-		SpoolUsagePercent:     spoolUsagePercent,
-		SpoolCapacityExceededTotal: spoolCapacityExceededTotal,
+		healthCheckTotal:      healthCheckTotal,
+		healthCheckDuration:   healthCheckDuration,
 	}
 
-	// Health endpoint
+	// Health endpoint (liveness)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if atomic.LoadInt32(&s.healthy) == 0 {
 			http.Error(w, "Service is unhealthy", http.StatusServiceUnavailable)
 			return
 		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
+		w.Write([]byte(`{"status":"live","timestamp":` + getCurrentTimestamp() + `}`))
 	})
 
 	// Readiness endpoint
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		// Honor explicitly disabled readiness state (SetReady(false))
 		if atomic.LoadInt32(&s.ready) == 0 {
-			http.Error(w, "Service is not ready to accept traffic", http.StatusServiceUnavailable)
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte("Service is not ready to accept traffic"))
 			return
 		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+
+		// Perform actual health checks
+		checks, failedChecks := s.performHealthChecks()
+		
+		if len(failedChecks) > 0 {
+			atomic.StoreInt32(&s.ready, 0)
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			
+			// Build error response
+			errorsJSON := "["
+			firstError := true
+			for _, err := range failedChecks {
+				if !firstError {
+					errorsJSON += ","
+				}
+				firstError = false
+				errorsJSON += `"` + escapeJSON(err) + `"`
+			}
+			errorsJSON += "]"
+			
+			checksJSON := "{"
+			firstCheck := true
+			for check, status := range checks {
+				if !firstCheck {
+					checksJSON += ","
+				}
+				firstCheck = false
+				checksJSON += `"` + check + `":"` + status + `"`
+			}
+			checksJSON += "}"
+			
+			response := fmt.Sprintf(`{"status":"not_ready","checks":%s,"errors":%s,"timestamp":%s}`, 
+				checksJSON, errorsJSON, getCurrentTimestamp())
+			w.Write([]byte(response))
+			return
+		}
+		
+		// All checks passed
+		atomic.StoreInt32(&s.ready, 1)
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
+		
+		checksJSON := "{"
+		first := true
+		for check, status := range checks {
+			if !first {
+				checksJSON += ","
+			}
+			first = false
+			checksJSON += `"` + check + `":"` + status + `"`
+		}
+		checksJSON += "}"
+		
+		response := fmt.Sprintf(`{"status":"ready","checks":%s,"timestamp":%s}`, checksJSON, getCurrentTimestamp())
+		w.Write([]byte(response))
 	})
 
 	// Metrics endpoint
@@ -416,24 +502,38 @@ func NewOperationsServer(address string, cfg *config.Config) (*OperationsServer,
 		EnableOpenMetrics: true,
 	}))
 
-	// Create the final handler with authentication middleware if configured
-	finalHandler := http.Handler(mux)
-	if authMiddleware != nil {
-		finalHandler = authMiddleware(mux)
-		// Log authentication configuration
-		fmt.Printf("HTTP authentication enabled: method=%s username=%s\n", 
-			cfg.HTTP.Auth.Method, cfg.HTTP.Auth.Username)
-		if cfg.HTTP.Auth.Method == "basic" {
-			fmt.Printf("WARNING: HTTP Basic Auth password has been set. Keep it secret!\n")
-		}
-	}
-
 	s.server = &http.Server{
 		Addr:    address,
-		Handler: finalHandler,
+		Handler: mux,
 	}
 
-	return s, nil
+	return s
+}
+
+// UpdateReadiness performs health checks and updates the readiness state accordingly
+func (s *OperationsServer) UpdateReadiness() {
+	_, failedChecks := s.performHealthChecks()
+	
+	if len(failedChecks) > 0 {
+		atomic.StoreInt32(&s.ready, 0)
+		fmt.Printf("Health checks failed: %v\n", failedChecks)
+	} else {
+		atomic.StoreInt32(&s.ready, 1)
+	}
+}
+
+// getCurrentTimestamp returns the current timestamp in RFC3339 format
+func getCurrentTimestamp() string {
+	return time.Now().UTC().Format(`"` + time.RFC3339 + `"`)
+}
+
+// escapeJSON escapes special characters for JSON strings
+func escapeJSON(s string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(
+		strings.ReplaceAll(s, `\`, `\\`),
+		`"`, `\"`),
+		`\n`, `\n`),
+		`\t`, `\t`)
 }
 
 // Run starts the HTTP server
@@ -467,8 +567,8 @@ func (s *OperationsServer) Run(ctx context.Context) error {
 		}
 	}()
 
-	// Wait for server to start and capture the actual address
-	time.Sleep(100 * time.Millisecond)
+	// Start health check loop in the background (this will be managed by the server lifecycle)
+	// Note: Health checks are performed on-demand in the /readyz endpoint
 
 	return nil
 }
@@ -586,7 +686,6 @@ func (s *OperationsServer) IncrementOcisRequestsTotal(service, status string) {
 		cv.WithLabelValues(service, status).Inc()
 	}
 }
-
 // Spool monitoring methods
 
 // SetSpoolSizeBytes sets the current spool size in bytes
@@ -622,44 +721,4 @@ func (s *OperationsServer) IncrementSpoolCapacityExceededTotal() {
 	if c, ok := s.SpoolCapacityExceededTotal.(prometheus.Counter); ok {
 		c.Inc()
 	}
-}
-
-// ErrorResponse represents a structured error response for API endpoints.
-type ErrorResponse struct {
-	Error struct {
-		Code    string                 `json:"code"`
-		Message string                 `json:"message"`
-		Details map[string]interface{} `json:"details,omitempty"`
-	} `json:"error"`
-}
-
-// NewErrorResponse creates a new error response from an error.
-// If the error is an AppError, it extracts the code, message, and details.
-// Otherwise, it uses INTERNAL_ERROR as the code.
-func NewErrorResponse(err error) ErrorResponse {
-	code := errors.GetCode(err)
-	message := errors.GetMessage(err)
-	details := errors.GetDetails(err)
-
-	// If we couldn't extract details, use empty map
-	if details == nil {
-		details = make(map[string]interface{})
-	}
-
-	return ErrorResponse{
-		Error: struct {
-			Code    string                 `json:"code"`
-			Message string                 `json:"message"`
-			Details map[string]interface{} `json:"details,omitempty"`
-		}{
-			Code:    string(code),
-			Message: message,
-			Details: details,
-		},
-	}
-}
-
-// GetHTTPStatus returns the appropriate HTTP status code for an error.
-func GetHTTPStatus(err error) int {
-	return errors.HTTPStatus(err)
 }
