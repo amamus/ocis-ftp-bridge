@@ -17,6 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/amamus/ocis-ftp-bridge/pkg/errors"
 	"github.com/amamus/ocis-ftp-bridge/pkg/webdav"
 )
 
@@ -134,7 +135,7 @@ func (tm *TransferManager) GetTarget(userID string) (TargetConfig, bool) {
 func (tm *TransferManager) CalculateTargetPath(userID, ftpPath, filename string) (string, error) {
 	config, exists := tm.GetTarget(userID)
 	if !exists {
-		return "", fmt.Errorf("no target configuration for user %s", userID)
+		return "", errors.NotFound("target configuration", userID)
 	}
 
 	// Start with the target root
@@ -169,9 +170,7 @@ func (tm *TransferManager) CalculateTargetPath(userID, ftpPath, filename string)
 	return targetPath, nil
 }
 
-// normalizeFTPPath normalizes an FTP path and prevents traversal.
-// This function validates that the path does not contain directory traversal
-// sequences and returns a clean, normalized path.
+// normalizeFTPPath normalizes an FTP path and prevents traversal
 func (tm *TransferManager) normalizeFTPPath(path string) (string, error) {
 	// Handle empty or root paths
 	if path == "" || path == "." || path == "/" {
@@ -179,25 +178,25 @@ func (tm *TransferManager) normalizeFTPPath(path string) (string, error) {
 	}
 
 	// Check for path traversal in original path (various patterns)
-	traversalPatterns := []string{"..", "/..", "../", "\\..\\", "..\\"}
+	traversalPatterns := []string{"..", "/..", "../", `\..\`, `..\`}
 	for _, pattern := range traversalPatterns {
 		if strings.Contains(path, pattern) {
-			return "", fmt.Errorf("path traversal not allowed: %s", path)
+			return "", errors.PathTraversal(path)
 		}
 	}
 
 	// Check for absolute paths (Unix and Windows)
-	if strings.HasPrefix(path, "/") || strings.HasPrefix(path, "\\") {
-		return "", fmt.Errorf("absolute paths not allowed: %s", path)
+	if strings.HasPrefix(path, "/") || strings.HasPrefix(path, `\`) {
+		return "", errors.PathTraversal(path)
 	}
 
 	// Check for drive letters (Windows)
 	if len(path) >= 2 && path[1] == ':' {
-		return "", fmt.Errorf("drive letters not allowed: %s", path)
+		return "", errors.PathTraversal(path)
 	}
 
 	// Remove leading slashes for normalization
-	path = strings.TrimLeft(path, "/\\")
+	path = strings.TrimLeft(path, `/\`)
 
 	// Handle case where we end up with empty string after trimming
 	if path == "" {
@@ -209,12 +208,12 @@ func (tm *TransferManager) normalizeFTPPath(path string) (string, error) {
 
 	// After cleaning, the path should not contain ..
 	if strings.Contains(cleanPath, "..") {
-		return "", fmt.Errorf("path traversal not allowed: %s", path)
+		return "", errors.PathTraversal(path)
 	}
 
 	// Validate that the cleaned path is still a relative path
 	if filepath.IsAbs(cleanPath) {
-		return "", fmt.Errorf("path resolved to absolute path: %s", path)
+		return "", errors.PathTraversal(path)
 	}
 
 	// Check length limits
@@ -227,65 +226,34 @@ func (tm *TransferManager) normalizeFTPPath(path string) (string, error) {
 }
 
 // sanitizeFilename sanitizes a filename to prevent security issues
-// while preserving Unicode characters.
-// This function validates that the filename does not contain path traversal
-// sequences and removes or replaces dangerous characters.
+// while preserving Unicode characters
 func (tm *TransferManager) sanitizeFilename(filename string) (string, error) {
 	if filename == "" {
-		return "", fmt.Errorf("filename cannot be empty")
+		return "", errors.InvalidInput("filename cannot be empty", nil)
 	}
 
-	// Store original for error messages
+	// Check for path traversal in the original filename before processing
+	// This catches attempts like "../secret.txt" or "path/../file.txt"
 	originalFilename := filename
+	if filename == ".." || strings.HasPrefix(filename, "../") || strings.Contains(filename, "/../") || strings.Contains(filename, "/..") || strings.HasSuffix(filename, "/..") {
+		return "", errors.PathTraversal(originalFilename)
+	}
 
 	// Check for absolute paths (Unix and Windows)
-	if strings.HasPrefix(filename, "/") || strings.HasPrefix(filename, "\\") {
-		return "", fmt.Errorf("filename cannot be absolute path: %s", originalFilename)
+	if strings.HasPrefix(filename, "/") || strings.HasPrefix(filename, `\`) {
+		return "", errors.PathTraversal(originalFilename)
 	}
 
-	// Check for drive letters (Windows) - e.g., "C:" or "C:filename"
+	// Check for drive letters (Windows)
 	if len(filename) >= 2 && filename[1] == ':' {
-		return "", fmt.Errorf("filename cannot contain drive letter: %s", originalFilename)
-	}
-
-	// Check for path traversal sequences BEFORE extracting base
-	// This catches attempts like "../secret.txt" or "path/../file.txt"
-	// We need to check the original filename for these patterns
-	if strings.Contains(originalFilename, "/..") || strings.Contains(originalFilename, "\\..") {
-		return "", fmt.Errorf("filename contains path traversal: %s", originalFilename)
-	}
-
-	// Check for leading ".." patterns
-	if strings.HasPrefix(originalFilename, "../") || strings.HasPrefix(originalFilename, "..\\") {
-		return "", fmt.Errorf("filename contains path traversal: %s", originalFilename)
-	}
-
-	// Check for ".." followed by path separator at any position
-	// This catches patterns like "foo/../bar" but not "...test.txt"
-	for i := 0; i < len(originalFilename)-2; i++ {
-		if originalFilename[i] == '.' && originalFilename[i+1] == '.' {
-			// Check if followed by a path separator
-			if i+2 < len(originalFilename) {
-				nextChar := originalFilename[i+2]
-				if nextChar == '/' || nextChar == '\\' {
-					return "", fmt.Errorf("filename contains path traversal: %s", originalFilename)
-				}
-			}
-			// Check if preceded by a path separator (for patterns like "/..file")
-			if i > 0 {
-				prevChar := originalFilename[i-1]
-				if prevChar == '/' || prevChar == '\\' {
-					return "", fmt.Errorf("filename contains path traversal: %s", originalFilename)
-				}
-			}
-		}
+		return "", errors.PathTraversal(originalFilename)
 	}
 
 	// Extract the base filename (removes any directory components)
 	filename = filepath.Base(filename)
 
-	// After Base(), check for ".." as the ENTIRE filename (not as part of it)
-	if filename == ".." || filename == "." {
+	// Double-check for path traversal in the base filename
+	if filename == ".." {
 		return "", fmt.Errorf("filename contains path traversal: %s", originalFilename)
 	}
 
@@ -293,9 +261,9 @@ func (tm *TransferManager) sanitizeFilename(filename string) (string, error) {
 	// This allows Unicode filenames while removing problematic characters
 	var safeFilename strings.Builder
 	for _, r := range filename {
-		// Allow printable characters (including Unicode)
-		// Block control characters (0-31), DEL (127), and null bytes
-		if r >= 32 && r != 127 {
+		// Allow letters, numbers, spaces, and common Unicode
+		// Block control characters, null bytes, etc.
+		if r >= 32 && r != 127 { // Allow printable characters (including Unicode)
 			safeFilename.WriteRune(r)
 		} else {
 			// Replace control characters with underscore
@@ -323,17 +291,15 @@ func (tm *TransferManager) sanitizeFilename(filename string) (string, error) {
 }
 
 // validateTargetPath ensures the target path stays within the target root
-// This prevents directory traversal attacks by verifying the resolved path
-// is contained within the target root directory.
 func (tm *TransferManager) validateTargetPath(targetPath, targetRoot string) error {
-	// Normalize both paths using filepath.Clean
+	// Ensure the target root is absolute and clean
 	cleanRoot := filepath.Clean(targetRoot)
-	cleanPath := filepath.Clean(targetPath)
-
-	// Ensure both paths are absolute for comparison
 	if !filepath.IsAbs(cleanRoot) {
 		cleanRoot = "/" + cleanRoot
 	}
+
+	// Ensure the target path is absolute and clean
+	cleanPath := filepath.Clean(targetPath)
 	if !filepath.IsAbs(cleanPath) {
 		cleanPath = "/" + cleanPath
 	}
@@ -343,29 +309,16 @@ func (tm *TransferManager) validateTargetPath(targetPath, targetRoot string) err
 		return nil
 	}
 
-	// Add trailing separator to root to ensure proper prefix matching
-	// This prevents cases where /root matches /root2 or /root-foo
+	// Add trailing separator to root to ensure proper prefix matching.
+	// This prevents /root from matching /root2 or /root-foo.
 	if !strings.HasSuffix(cleanRoot, "/") {
 		cleanRoot += "/"
 	}
 
 	// Check if the target path is within the target root
-	// The path must start with root (which now has a trailing separator)
+	// This prevents directory traversal attacks
 	if !strings.HasPrefix(cleanPath, cleanRoot) {
-		return fmt.Errorf("target path %s is outside target root %s", targetPath, targetRoot)
-	}
-
-	// Additional check: ensure no parent directory escape after the root
-	// This catches edge cases like /root/../attack or /root/foo/../../bar
-	relPath, err := filepath.Rel(cleanRoot, cleanPath)
-	if err != nil {
-		// If Rel returns an error, the paths are on different drives (Windows) or invalid
-		return fmt.Errorf("target path %s is invalid or outside target root %s", targetPath, targetRoot)
-	}
-	// Only reject if relPath starts with "../" or is exactly ".."
-	// This allows filenames that start with ".." like "...test.txt" or "..file.txt"
-	if relPath == ".." || strings.HasPrefix(relPath, "../") || strings.HasPrefix(relPath, "..\\") {
-		return fmt.Errorf("target path %s escapes target root %s", targetPath, targetRoot)
+		return errors.PathTraversal(fmt.Sprintf("%s is outside %s", targetPath, targetRoot))
 	}
 
 	return nil
@@ -439,7 +392,7 @@ func (tm *TransferManager) ResolveCollision(basePath, filename string, policy Co
 			return "", err
 		}
 		if exists {
-			return "", fmt.Errorf("file already exists: %s", filename)
+			return "", errors.AlreadyExists("file", filename)
 		}
 		return filename, nil
 
@@ -448,7 +401,7 @@ func (tm *TransferManager) ResolveCollision(basePath, filename string, policy Co
 		return tm.GenerateUniqueFilename(basePath, filename), nil
 
 	default:
-		return "", fmt.Errorf("unknown collision policy: %s", policy)
+		return "", errors.InvalidInput("unknown collision policy", map[string]interface{}{"policy": policy})
 	}
 }
 
