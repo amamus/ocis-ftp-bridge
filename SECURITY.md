@@ -167,11 +167,11 @@ govulncheck ./...
 The ocis-ftp-bridge uses Argon2id password hashing (PHC format). To generate a password hash:
 
 ```bash
-# Using htpasswd (recommended)
-htpasswd -B -C 12 -i -d password | tr -d '\n'
+# Using the built-in Go tool (recommended)
+go run ./cmd/hash-password <password>
 
-# Using the built-in Go tool
-go run cmd/hash-password/main.go
+# With custom Argon2id parameters
+go run ./cmd/hash-password -m 65536 -t 3 -p 4 <password>
 ```
 
 Example hash format:

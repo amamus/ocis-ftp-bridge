@@ -247,6 +247,15 @@ func LoadFileWithEnv(filename string, lookupEnv func(string) (string, bool)) (*C
 	if strings.TrimSpace(filename) == "" {
 		return nil, errors.New("configuration file path is required")
 	}
+
+	// Security check: warn if config file contains potential plaintext passwords.
+	// This must run before KnownFields(true) decoding so that unknown credential
+	// keys (e.g. "password:") are caught by the scanner rather than silently
+	// rejected by strict field validation before the check can run.
+	if err := checkForPlaintextCredentials(filename); err != nil {
+		slog.Warn("Potential security issue in configuration", "file", filename, "error", err)
+	}
+
 	f, err := os.Open(filename)
 	if err != nil {
 		return nil, fmt.Errorf("open configuration %q: %w", filename, err)
@@ -259,12 +268,6 @@ func LoadFileWithEnv(filename string, lookupEnv func(string) (string, bool)) (*C
 	dec.KnownFields(true)
 	if err := dec.Decode(cfg); err != nil {
 		return nil, fmt.Errorf("decode configuration %q: %w", filename, err)
-	}
-	
-	// Security check: warn if config file contains potential plaintext passwords
-	// This is a best-effort check to prevent accidental credential exposure
-	if err := checkForPlaintextCredentials(filename); err != nil {
-		slog.Warn("Potential security issue in configuration", "file", filename, "error", err)
 	}
 
 	accountsMap := make(map[string]bool, len(cfg.Accounts))

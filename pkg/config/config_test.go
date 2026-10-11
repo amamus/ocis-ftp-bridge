@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/base64"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -125,6 +126,119 @@ func TestByteSizesAndCollisionPolicies(t *testing.T) {
 		if _, err := loadText(t, body, map[string]string{"OCIS_FTP_RECEPTION_TOKEN": "token"}); err != nil {
 			t.Fatalf("%s should be valid: %v", policy, err)
 		}
+	}
+}
+
+// TestCheckForPlaintextCredentials verifies that the plaintext credential
+// scanner detects plaintext password keys in configuration files.
+func TestCheckForPlaintextCredentials(t *testing.T) {
+	t.Run("detects common password value", func(t *testing.T) {
+		content := `accounts:
+  - username: test
+    password: changeme
+`
+		name := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(name, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+		err := checkForPlaintextCredentials(name)
+		if err == nil {
+			t.Fatal("expected plaintext credential detection error")
+		}
+	})
+
+	t.Run("detects long token-like value", func(t *testing.T) {
+		content := `accounts:
+  - username: test
+    token: abcdefghijklmnopqrstuvwxyz1234567890
+`
+		name := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(name, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+		err := checkForPlaintextCredentials(name)
+		if err == nil {
+			t.Fatal("expected plaintext credential detection error")
+		}
+	})
+
+	t.Run("ignores password_hash key", func(t *testing.T) {
+		content := `accounts:
+  - username: test
+    password_hash: $argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaaJObG
+`
+		name := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(name, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+		err := checkForPlaintextCredentials(name)
+		if err != nil {
+			t.Fatalf("unexpected error for password_hash: %v", err)
+		}
+	})
+}
+
+// TestLoadFilePlaintextCheckRunsBeforeDecode verifies that the plaintext
+// credential scanner runs before KnownFields(true) rejects unknown fields.
+// A config with "password: changeme" should trigger the plaintext warning
+// even though "password" is not a known field.
+func TestLoadFilePlaintextCheckRunsBeforeDecode(t *testing.T) {
+	// Capture slog output to verify the warning is logged
+	var logBuf strings.Builder
+	originalHandler := slog.Default()
+	defer slog.SetDefault(originalHandler)
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+
+	content := `server:
+  listen: ":21"
+  passive:
+    min_port: 30000
+    max_port: 30020
+    public_ip: ""
+  tls:
+    enabled: false
+ocis:
+  url: https://cloud.example.com
+spool:
+  directory: /var/lib/ocis-ftp/spool
+  max_total_size: 2GiB
+accounts:
+  - username: reception
+    password: changeme
+    password_hash: "` + testHash("secret") + `"
+    ocis:
+      username: scanner-service
+      app_token_env: OCIS_FTP_RECEPTION_TOKEN
+    target:
+      drive: Incoming Scans
+      root: /Reception
+    upload:
+      collision_policy: rename
+      max_size: 250MiB
+`
+	name := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(name, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// LoadFile will fail because "password" is an unknown field,
+	// but the plaintext check should have logged a warning first.
+	_, err := LoadFileWithEnv(name, func(k string) (string, bool) {
+		if k == "OCIS_FTP_RECEPTION_TOKEN" {
+			return "token", true
+		}
+		return "", false
+	})
+
+	// The load should fail due to unknown field "password"
+	if err == nil {
+		t.Fatal("expected error for unknown field 'password'")
+	}
+
+	// But the plaintext check should have logged a warning before the decode error
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "Potential security issue") {
+		t.Errorf("expected plaintext credential warning in logs, got: %s", logOutput)
 	}
 }
 
