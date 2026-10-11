@@ -18,6 +18,16 @@ spool:
   directory: /var/lib/ocis-ftp/spool
   max_total_size: 2GiB
 
+# HTTP server for health checks and metrics
+http:
+  address: ":9200"  # HTTP server address for health/ready endpoints (must match container port)
+  auth:
+    enabled: true  # Authentication enabled by default for security
+    method: basic  # Authentication method: basic, bearer, or none
+    username: admin  # HTTP basic auth username
+    # password: ""  # Password will be auto-generated if not specified
+    # For production, set a strong password or use bearer token
+
 accounts:
   - username: reception
     # Password hash (Argon2id PHC format).

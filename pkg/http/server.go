@@ -6,16 +6,43 @@ package http
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
 	"fmt"
+	"io"
+	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/amamus/ocis-ftp-bridge/pkg/config"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+// generateRandomPassword generates a cryptographically secure random password of the given length.
+// It fails closed: if crypto/rand is unavailable, an error is returned rather than
+// falling back to a predictable value.
+func generateRandomPassword(length int) (string, error) {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*"
+	const charsetLen = len(charset)
+
+	password := make([]byte, length)
+	for i := 0; i < length; i++ {
+		randomBytes := make([]byte, 4)
+		if _, err := io.ReadFull(rand.Reader, randomBytes); err != nil {
+			return "", fmt.Errorf("failed to generate secure random password: %w", err)
+		}
+		index := int(randomBytes[0]) % charsetLen
+		password[i] = charset[index]
+	}
+
+	return string(password), nil
+}
 
 // Server provides HTTP operations endpoints
 type Server interface {
@@ -34,6 +61,7 @@ type OperationsServer struct {
 	actualAddr string
 	mux        *http.ServeMux
 	address    string
+	cfg        *config.Config
 
 	// Health and readiness state
 	healthy int32 // atomic: 1 = healthy, 0 = unhealthy
@@ -50,7 +78,107 @@ type OperationsServer struct {
 }
 
 // NewOperationsServer creates a new operations HTTP server
-func NewOperationsServer(address string) *OperationsServer {
+// BasicAuthMiddleware creates a middleware that requires HTTP Basic Authentication
+func BasicAuthMiddleware(username, password string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Skip authentication for health and readiness endpoints.
+			// Kubernetes liveness and readiness probes call these without credentials.
+			if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			
+			// Check for Basic Authentication header
+			auth := r.Header.Get("Authorization")
+			if auth == "" {
+				// No authorization header provided
+				w.Header().Set("WWW-Authenticate", `Basic realm="ocis-ftp-bridge"`)
+				http.Error(w, "Unauthorized: Authentication required", http.StatusUnauthorized)
+				return
+			}
+			
+			// Parse Basic Auth header
+			const basicPrefix = "Basic "
+			if !strings.HasPrefix(auth, basicPrefix) {
+				w.Header().Set("WWW-Authenticate", `Basic realm="ocis-ftp-bridge"`)
+				http.Error(w, "Unauthorized: Invalid authorization method", http.StatusUnauthorized)
+				return
+			}
+			
+			// Decode the credentials
+			encoded := strings.TrimPrefix(auth, basicPrefix)
+			decoded, err := base64.StdEncoding.DecodeString(encoded)
+			if err != nil {
+				w.Header().Set("WWW-Authenticate", `Basic realm="ocis-ftp-bridge"`)
+				http.Error(w, "Unauthorized: Invalid credentials encoding", http.StatusUnauthorized)
+				return
+			}
+			
+			// Split into username:password
+			creds := strings.SplitN(string(decoded), ":", 2)
+			if len(creds) != 2 {
+				w.Header().Set("WWW-Authenticate", `Basic realm="ocis-ftp-bridge"`)
+				http.Error(w, "Unauthorized: Invalid credentials format", http.StatusUnauthorized)
+				return
+			}
+			
+			// Validate credentials using constant-time comparison
+			providedUsername := creds[0]
+			providedPassword := creds[1]
+			
+			if subtle.ConstantTimeCompare([]byte(providedUsername), []byte(username)) != 1 ||
+				subtle.ConstantTimeCompare([]byte(providedPassword), []byte(password)) != 1 {
+				w.Header().Set("WWW-Authenticate", `Basic realm="ocis-ftp-bridge"`)
+				http.Error(w, "Unauthorized: Invalid credentials", http.StatusUnauthorized)
+				return
+			}
+			
+			// Authentication successful
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// BearerAuthMiddleware creates a middleware that requires Bearer token authentication
+func BearerAuthMiddleware(token string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Skip authentication for health endpoints
+			if r.URL.Path == "/healthz" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			
+			// Check for Authorization header
+			auth := r.Header.Get("Authorization")
+			if auth == "" {
+				http.Error(w, "Unauthorized: Bearer token required", http.StatusUnauthorized)
+				return
+			}
+			
+			// Parse Bearer token
+			const bearerPrefix = "Bearer "
+			if !strings.HasPrefix(auth, bearerPrefix) {
+				http.Error(w, "Unauthorized: Invalid authorization method", http.StatusUnauthorized)
+				return
+			}
+			
+			providedToken := strings.TrimPrefix(auth, bearerPrefix)
+			
+			// Validate token using constant-time comparison
+			if subtle.ConstantTimeCompare([]byte(providedToken), []byte(token)) != 1 {
+				http.Error(w, "Unauthorized: Invalid token", http.StatusUnauthorized)
+				return
+			}
+			
+			// Authentication successful
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func NewOperationsServer(address string, cfg *config.Config) (*OperationsServer, error) {
 	// Create custom registry for our metrics
 	registry := prometheus.NewRegistry()
 
@@ -139,6 +267,45 @@ func NewOperationsServer(address string) *OperationsServer {
 		ocisRequestsTotal,
 	)
 
+	// Store configuration
+	var authMiddleware func(http.Handler) http.Handler
+	
+	// Configure authentication middleware if enabled
+	if cfg != nil && cfg.HTTP.Auth.Enabled {
+		switch cfg.HTTP.Auth.Method {
+		case "basic":
+			// Generate a random password if none is provided
+			if cfg.HTTP.Auth.Password == "" {
+				generated, err := generateRandomPassword(16)
+				if err != nil {
+					return nil, fmt.Errorf("failed to generate HTTP auth password: %w", err)
+				}
+				cfg.HTTP.Auth.Password = generated
+				slog.Warn("HTTP Basic auth enabled without explicit password; generated one",
+					"username", cfg.HTTP.Auth.Username,
+					"password", generated,
+					"warning", "set http.auth.password explicitly for persistent credentials")
+			}
+			authMiddleware = BasicAuthMiddleware(cfg.HTTP.Auth.Username, cfg.HTTP.Auth.Password)
+		case "bearer":
+			if cfg.HTTP.Auth.BearerToken == "" {
+				generated, err := generateRandomPassword(32)
+				if err != nil {
+					return nil, fmt.Errorf("failed to generate HTTP bearer token: %w", err)
+				}
+				cfg.HTTP.Auth.BearerToken = generated
+				slog.Warn("HTTP Bearer auth enabled without explicit token; generated one",
+					"token", generated,
+					"warning", "set http.auth.bearer_token explicitly for persistent credentials")
+			}
+			authMiddleware = BearerAuthMiddleware(cfg.HTTP.Auth.BearerToken)
+		default:
+			// No authentication, but this should be caught by config validation
+			// If we reach here, authentication is effectively disabled
+			authMiddleware = nil
+		}
+	}
+
 	// Set up HTTP routes
 	mux := http.NewServeMux()
 
@@ -146,6 +313,7 @@ func NewOperationsServer(address string) *OperationsServer {
 	s := &OperationsServer{
 		address:               address,
 		mux:                  mux,
+		cfg:                 cfg,
 		healthy:               1,
 		ready:                 1,
 		ftpSessionsTotal:      ftpSessionsTotal,
@@ -184,12 +352,24 @@ func NewOperationsServer(address string) *OperationsServer {
 		EnableOpenMetrics: true,
 	}))
 
-	s.server = &http.Server{
-		Addr:    address,
-		Handler: mux,
+	// Create the final handler with authentication middleware if configured
+	finalHandler := http.Handler(mux)
+	if authMiddleware != nil {
+		finalHandler = authMiddleware(mux)
+		// Log authentication configuration
+		fmt.Printf("HTTP authentication enabled: method=%s username=%s\n", 
+			cfg.HTTP.Auth.Method, cfg.HTTP.Auth.Username)
+		if cfg.HTTP.Auth.Method == "basic" {
+			fmt.Printf("WARNING: HTTP Basic Auth password has been set. Keep it secret!\n")
+		}
 	}
 
-	return s
+	s.server = &http.Server{
+		Addr:    address,
+		Handler: finalHandler,
+	}
+
+	return s, nil
 }
 
 // Run starts the HTTP server
