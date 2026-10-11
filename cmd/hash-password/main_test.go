@@ -133,3 +133,46 @@ func TestHashPasswordSaltUniqueness(t *testing.T) {
 		t.Fatal("expected different salts")
 	}
 }
+
+// TestHashPasswordInvalidParams verifies that out-of-range Argon2id parameters
+// are rejected with a clean error (exit code 1, no panic) instead of an
+// argon2 panic or a silently truncated conversion.
+func TestHashPasswordInvalidParams(t *testing.T) {
+	bin := t.TempDir() + "/hash-password"
+	buildCmd := exec.Command("go", "build", "-o", bin, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build hash-password: %v\n%s", err, out)
+	}
+
+	cases := map[string][]string{
+		"zero time":                   {"-t", "0", "secret"},
+		"zero memory":                 {"-m", "0", "secret"},
+		"zero threads":                {"-p", "0", "secret"},
+		"threads above uint8":         {"-p", "256", "secret"},
+		"zero key length":             {"-k", "0", "secret"},
+		"time overflows uint32":       {"-t", "4294967296", "secret"},
+		"memory overflows uint32":     {"-m", "4294967296", "secret"},
+		"key length overflows uint32": {"-k", "4294967296", "secret"},
+	}
+	for name, args := range cases {
+		t.Run(name, func(t *testing.T) {
+			out, err := exec.Command(bin, args...).CombinedOutput()
+			if err == nil {
+				t.Fatalf("expected non-zero exit for args %v, got output: %s", args, out)
+			}
+			exitErr, ok := err.(*exec.ExitError)
+			if !ok {
+				t.Fatalf("expected ExitError, got %T: %v", err, err)
+			}
+			if exitErr.ExitCode() != 1 {
+				t.Fatalf("expected exit code 1 for args %v, got %d (output: %s)", args, exitErr.ExitCode(), out)
+			}
+			if strings.Contains(string(out), "panic") {
+				t.Fatalf("expected clean error, got panic for args %v: %s", args, out)
+			}
+			if !strings.Contains(string(out), "invalid") {
+				t.Fatalf("expected error message to mention invalid parameter for args %v, got: %s", args, out)
+			}
+		})
+	}
+}

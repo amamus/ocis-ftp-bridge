@@ -20,9 +20,14 @@ env:
   GO_VERSION: '1.27'
   BINARY_NAME: 'ocis-ftp-bridge'
   FTP_PORT: '2121'
-  HTTP_PORT: '9200'
+  # The e2e job runs a mock oCIS WebDAV server on port 9200, so the bridge's
+  # HTTP operations server must use a different port.
+  HTTP_PORT: '9090'
   PASSIVE_MIN_PORT: '40000'
   PASSIVE_MAX_PORT: '40100'
+  # App tokens for the e2e test accounts (referenced via app_token_env)
+  TEST_PRINTER_APP_TOKEN: 'test-app-token-1'
+  TEST_PRINTER_2_APP_TOKEN: 'test-app-token-2'
 
 jobs:
   # Unit tests, linting, and build validation
@@ -123,55 +128,67 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y lftp wget
 
+    - name: Generate test password hashes
+      run: |
+        # The bridge stores Argon2id password hashes, not plaintext passwords
+        echo "TEST_PRINTER_HASH=$(go run ./cmd/hash-password test-password)" >> "$GITHUB_ENV"
+        echo "TEST_PRINTER_2_HASH=$(go run ./cmd/hash-password test-password-2)" >> "$GITHUB_ENV"
+
     - name: Create test configuration
       run: |
         # Create a test configuration file
         cat > test-config.yaml << 'EOF'
         server:
           listen: "0.0.0.0:${{ env.FTP_PORT }}"
-          idletimeout: 300
-          connectiontimeout: 60
-          
-        http:
-          address: "0.0.0.0:${{ env.HTTP_PORT }}"
-          
-        spool:
-          directory: /tmp/ocis-ftp-bridge-spool
-          maxsize: 1073741824 # 1GB
-          cleanup_age_hours: 24
-          
-        ocis:
-          graph_url: "http://localhost:9100"
-          webdav_url: "http://localhost:9200/webdav"
-          
-        ftp:
           passive:
             min_port: ${{ env.PASSIVE_MIN_PORT }}
             max_port: ${{ env.PASSIVE_MAX_PORT }}
+            public_ip: "127.0.0.1"
           tls:
             enabled: false
-            cert_file: ""
-            key_file: ""
-          public_host: "127.0.0.1"
-          
+
+        http:
+          address: "0.0.0.0:${{ env.HTTP_PORT }}"
+
+        spool:
+          directory: /tmp/ocis-ftp-bridge-spool
+          max_total_size: 1073741824 # 1GB
+
+        ocis:
+          url: "http://localhost:9100"
+          graph_url: "http://localhost:9100"
+          webdav_url: "http://localhost:9200/webdav"
+
         accounts:
           - username: "test-printer"
-            password: "test-password"
-            drive_id: "test-drive-id"
-            target_path: "/uploads"
-            collision_policy: "rename"
-            max_upload_size: 104857600 # 100MB
-            
+            password_hash: "${{ env.TEST_PRINTER_HASH }}"
+            ocis:
+              username: "test-printer"
+              app_token_env: "TEST_PRINTER_APP_TOKEN"
+            target:
+              drive_id: "test-drive-id"
+              root: "/"
+            upload:
+              collision_policy: "rename"
+              max_size: 104857600 # 100MB
+
           - username: "test-printer-2"
-            password: "test-password-2"
-            drive_id: "test-drive-id-2"
-            target_path: "/uploads"
-            collision_policy: "reject"
-            max_upload_size: 104857600 # 100MB
-            
-        logging:
-          level: "debug"
-          format: "text"
+            password_hash: "${{ env.TEST_PRINTER_2_HASH }}"
+            ocis:
+              username: "test-printer-2"
+              app_token_env: "TEST_PRINTER_2_APP_TOKEN"
+            target:
+              drive_id: "test-drive-id-2"
+              root: "/"
+            upload:
+              collision_policy: "reject"
+              max_size: 104857600 # 100MB
+
+        observability:
+          logger:
+            level: "debug"
+            format: "text"
+
         EOF
         
         # Create spool directory
@@ -325,9 +342,9 @@ jobs:
         Line 3
         EOF
         
-        echo -e "open -u test-printer,test-password localhost ${{ env.FTP_PORT }}
+        echo -e "open -u test-printer,test-password -p ${{ env.FTP_PORT }} localhost
         put test-file.txt -o /uploads/test-file.txt
-        quit" | lftp -p ${{ env.FTP_PORT }} -e "set ftp:ssl-force false; set ftp:use-epsv true;" 2>&1 | tee ftp-test-1.log
+        quit" | lftp -e "set ftp:ssl-force false;" 2>&1 | tee ftp-test-1.log
         
         if wget -q http://localhost:9200/webdav/uploads/test-file.txt -O /tmp/received-file.txt; then
           if diff -q test-file.txt /tmp/received-file.txt > /dev/null 2>&1; then
@@ -343,13 +360,16 @@ jobs:
         
         # Test 2: Invalid FTP credentials fail
         echo "=== Test 2: Invalid FTP credentials ==="
-        echo -e "open -u invalid-user,invalid-password localhost ${{ env.FTP_PORT }}
-        quit" | lftp -p ${{ env.FTP_PORT }} -e "set ftp:ssl-force false; set ftp:use-epsv true;" 2>&1 | tee ftp-test-2.log
+        if curl -sS -m 10 -v "ftp://invalid-user:invalid-password@localhost:${{ env.FTP_PORT }}/" --list-only > ftp-test-2.log 2>&1; then
+          echo "FAIL: Test 2 - Invalid credentials were accepted"
+          exit 1
+        fi
         
-        if grep -q "Login failed\|530" ftp-test-2.log; then
+        if grep -q "530" ftp-test-2.log; then
           echo "PASS: Test 2 - Invalid credentials rejected"
         else
           echo "FAIL: Test 2 - Invalid credentials were not properly rejected"
+          cat ftp-test-2.log
           exit 1
         fi
         
@@ -358,7 +378,7 @@ jobs:
         health_response=$(wget -q -O- http://localhost:${{ env.HTTP_PORT }}/healthz)
         ready_response=$(wget -q -O- http://localhost:${{ env.HTTP_PORT }}/readyz)
         
-        if [ "$health_response" = "OK" ] && [ "$ready_response" = "OK" ]; then
+        if echo "$health_response" | grep -q '"status":"live"' && echo "$ready_response" | grep -q '"status":"ready"'; then
           echo "PASS: Test 3 - Health and readiness endpoints responding"
         else
           echo "FAIL: Test 3 - Health/readiness endpoints not responding correctly"

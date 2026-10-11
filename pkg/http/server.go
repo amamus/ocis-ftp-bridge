@@ -185,7 +185,7 @@ func (s *OperationsServer) checkSpoolDirectory() error {
 	// Check if directory is writable using a more reliable method
 	// Use a unique filename to avoid race conditions
 	testFile := filepath.Join(s.spoolDirectory, fmt.Sprintf(".healthcheck_test_%d_%s", os.Getpid(), time.Now().Format("20060102150405")))
-	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
+	if err := os.WriteFile(testFile, []byte("test"), 0600); err != nil {
 		return fmt.Errorf("spool directory %q is not writable: %w", s.spoolDirectory, err)
 	}
 	
@@ -505,6 +505,8 @@ func NewOperationsServer(address string, healthConfig HealthCheckConfig) *Operat
 	s.server = &http.Server{
 		Addr:    address,
 		Handler: mux,
+		// Mitigate Slowloris attacks: bound the time spent reading request headers
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	return s

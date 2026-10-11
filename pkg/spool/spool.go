@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -258,10 +259,18 @@ func (m *uploadManager) StartUpload(ctx context.Context, userID, filename, targe
 	if filename == "" {
 		return nil, ErrInvalidParameters
 	}
+	// A negative expected size means the size is unknown (e.g. an FTP STOR
+	// before any data is received); treat it as zero for capacity accounting.
+	// Upload.Size <= 0 marks the upload as "size unknown" throughout.
 	if expectedSize < 0 {
-		return nil, ErrInvalidParameters
+		expectedSize = 0
 	}
 	if accountMaxSize == 0 {
+		return nil, ErrInvalidParameters
+	}
+	// accountMaxSize must fit in int64: WriteChunk compares it against int64
+	// byte counters via int64 conversion, which would overflow above MaxInt64.
+	if accountMaxSize > math.MaxInt64 {
 		return nil, ErrInvalidParameters
 	}
 
@@ -359,13 +368,14 @@ func (m *uploadManager) WriteChunk(upload *Upload, data []byte) (int, error) {
 	default:
 	}
 
-	// Check size limits
+	// Check size limits (a non-positive Size means the expected size is unknown)
 	remaining := upload.Size - upload.BytesReceived
-	if int64(len(data)) > remaining {
+	if upload.Size > 0 && int64(len(data)) > remaining {
 		return 0, ErrFileTooLarge
 	}
 
 	// Check if this chunk would exceed account max size
+	// #nosec G115 -- accountMaxSize is validated <= math.MaxInt64 in StartUpload and config validation
 	if upload.BytesReceived+int64(len(data)) > int64(upload.AccountMaxSize) {
 		return 0, ErrFileTooLarge
 	}
@@ -395,7 +405,9 @@ func (m *uploadManager) FinishUpload(upload *Upload) (FileRef, error) {
 	default:
 	}
 
-	if upload.BytesReceived != upload.Size {
+	// A non-positive Size means the expected size was unknown; the upload is
+	// complete once the client has closed the transfer.
+	if upload.Size > 0 && upload.BytesReceived != upload.Size {
 		return FileRef{}, ErrUploadIncomplete
 	}
 
@@ -434,8 +446,8 @@ func (m *uploadManager) FinishUpload(upload *Upload) (FileRef, error) {
 		}
 	}
 
-	// Set final permissions
-	if err := os.Chmod(finalPath, 0640); err != nil {
+	// Set final permissions (owner-only: spool files contain user uploads)
+	if err := os.Chmod(finalPath, 0600); err != nil {
 		return FileRef{}, fmt.Errorf("failed to set final file permissions: %w", err)
 	}
 
@@ -514,13 +526,13 @@ func (m *uploadManager) generateFileID(upload *Upload) string {
 
 // copyFile copies a file from src to dst.
 func copyFile(dst, src string) error {
-	source, err := os.Open(src)
+	source, err := os.Open(src) // #nosec G304 -- src is a spool-internal temp path, not user input
 	if err != nil {
 		return err
 	}
 	defer source.Close()
 
-	destination, err := os.Create(dst)
+	destination, err := os.Create(dst) // #nosec G304 -- dst is a spool-internal path built from a generated file ID
 	if err != nil {
 		return err
 	}
@@ -565,7 +577,7 @@ func (m *defaultManager) Store(userID string, filename string, data []byte) (Fil
 	fileID := fmt.Sprintf("file-%s-%d", hex.EncodeToString(idHash[:])[:16], len(data))
 	filePath := filepath.Join(userDir, fileID)
 
-	if err := os.WriteFile(filePath, data, 0640); err != nil {
+	if err := os.WriteFile(filePath, data, 0600); err != nil {
 		return FileRef{}, fmt.Errorf("failed to write spool file: %w", err)
 	}
 
@@ -635,6 +647,11 @@ func (m *defaultManager) Retrieve(userID string, fileID string) ([]byte, error) 
 		return nil, ErrInvalidParameters
 	}
 
+	// fileID must be a plain file name: no path separators or parent references
+	if fileID == "." || fileID == ".." || fileID != filepath.Base(fileID) || strings.Contains(fileID, `\`) {
+		return nil, ErrPathTraversal
+	}
+
 	cleanUserID := filepath.Clean(userID)
 	absSpoolDir, err := filepath.Abs(m.spoolDir)
 	if err != nil {
@@ -650,13 +667,13 @@ func (m *defaultManager) Retrieve(userID string, fileID string) ([]byte, error) 
 
 	// Try to find the file with the given ID
 	filePath := filepath.Join(userDir, fileID)
-	if data, err := os.ReadFile(filePath); err == nil {
+	if data, err := os.ReadFile(filePath); err == nil { // #nosec G304 -- fileID is validated against path traversal at the top of Retrieve
 		return data, nil
 	}
 
 	// Try to find the file with file- prefix
 	filePath = filepath.Join(userDir, "file-"+fileID)
-	if data, err := os.ReadFile(filePath); err == nil {
+	if data, err := os.ReadFile(filePath); err == nil { // #nosec G304 -- fileID is validated against path traversal at the top of Retrieve
 		return data, nil
 	}
 
@@ -875,7 +892,9 @@ func (m *defaultManager) GetUsage() (used uint64, capacity uint64, err error) {
 
 	var totalUsed uint64
 	for _, file := range allFiles {
-		totalUsed += uint64(file.Size)
+		if file.Size > 0 {
+			totalUsed += uint64(file.Size)
+		}
 	}
 
 	return totalUsed, m.maxSize, nil

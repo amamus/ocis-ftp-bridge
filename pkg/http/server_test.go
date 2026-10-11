@@ -176,3 +176,15 @@ func TestOperationsServer_Metrics(t *testing.T) {
 		server.IncrementOcisRequestsTotal("webdav", "failure")
 	})
 }
+
+// TestOperationsServer_ReadHeaderTimeout verifies that the HTTP server is
+// configured with a ReadHeaderTimeout to mitigate Slowloris attacks.
+func TestOperationsServer_ReadHeaderTimeout(t *testing.T) {
+	server := NewOperationsServer(":0", HealthCheckConfig{CheckTimeout: 5 * time.Second})
+	if server.server == nil {
+		t.Fatal("expected underlying http.Server to be initialized")
+	}
+	if server.server.ReadHeaderTimeout != 10*time.Second {
+		t.Fatalf("expected ReadHeaderTimeout of 10s, got %v", server.server.ReadHeaderTimeout)
+	}
+}

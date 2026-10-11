@@ -141,8 +141,8 @@ func getOutputWriter(output string) (*os.File, error) {
 	case "":
 		return os.Stdout, nil
 	default:
-		// For file paths, open the file
-		file, err := os.OpenFile(output, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		// For file paths, open the file (owner-only: logs may contain sensitive data)
+		file, err := os.OpenFile(output, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600) // #nosec G304 -- log file path is operator-provided configuration, not user input
 		if err != nil {
 			return nil, err
 		}

@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -261,7 +262,7 @@ func New() *Config {
 // This is a best-effort check to warn users about potential security issues
 func checkForPlaintextCredentials(filename string) error {
 	// Read the raw file content
-	data, err := os.ReadFile(filename)
+	data, err := os.ReadFile(filename) // #nosec G304 -- config path is operator-provided, not user input
 	if err != nil {
 		return nil // Can't read, skip check
 	}
@@ -349,7 +350,7 @@ func LoadFileWithEnv(filename string, lookupEnv func(string) (string, bool)) (*C
 		slog.Warn("Potential security issue in configuration", "file", filename, "error", err)
 	}
 
-	f, err := os.Open(filename)
+	f, err := os.Open(filename) // #nosec G304 -- config path is operator-provided, not user input
 	if err != nil {
 		return nil, fmt.Errorf("open configuration %q: %w", filename, err)
 	}
@@ -476,6 +477,12 @@ func (c *Config) validateWithEnv(lookupEnv func(string) (string, bool)) error {
 		}
 		if account.Upload.MaxSize == 0 {
 			return fmt.Errorf("%s.upload.max_size must be greater than zero", prefix)
+		}
+		// max_size must fit in int64: the upload hot path compares it against
+		// int64 byte counters via int64 conversion, which would overflow above
+		// MaxInt64 and silently block all uploads for the account.
+		if account.Upload.MaxSize > ByteSize(math.MaxInt64) {
+			return fmt.Errorf("%s.upload.max_size must not exceed %d bytes", prefix, uint64(math.MaxInt64))
 		}
 	}
 	return nil
@@ -726,6 +733,12 @@ type argon2Params struct {
 	hash    []byte
 }
 
+// maxArgon2DigestLength bounds the digest length accepted in a PHC string.
+// VerifyPassword derives the key with argon2.IDKey using the digest length as
+// the key length, so an oversized digest from a malicious config would cause
+// a huge allocation. Real password hashes are 32-128 bytes.
+const maxArgon2DigestLength = 4096
+
 func parseArgon2ID(encoded string) (argon2Params, error) {
 	var p argon2Params
 	parts := strings.Split(encoded, "$")
@@ -752,6 +765,9 @@ func parseArgon2ID(encoded string) (argon2Params, error) {
 		}
 		return p, fmt.Errorf("invalid Argon2id digest: %w", err)
 	}
+	if len(p.hash) > maxArgon2DigestLength {
+		return p, fmt.Errorf("invalid Argon2id digest: length %d exceeds maximum of %d bytes", len(p.hash), maxArgon2DigestLength)
+	}
 	return p, nil
 }
 
@@ -760,6 +776,7 @@ func VerifyPassword(encodedHash, password string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	// #nosec G115 -- digest length is capped at maxArgon2DigestLength in parseArgon2ID
 	actual := argon2.IDKey([]byte(password), p.salt, p.time, p.memory, p.threads, uint32(len(p.hash)))
 	return subtle.ConstantTimeCompare(actual, p.hash) == 1, nil
 }

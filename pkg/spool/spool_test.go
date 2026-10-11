@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -169,6 +170,85 @@ func TestStore_PathTraversal(t *testing.T) {
 	_, err = manager.Store("testuser/..", "testfile.txt", []byte("data"))
 	require.Error(t, err)
 	assert.Equal(t, ErrPathTraversal, err)
+}
+
+func TestRetrieve_PathTraversal(t *testing.T) {
+	t.Parallel()
+
+	tempDir, err := os.MkdirTemp("", "spool-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	manager, err := NewManager(tempDir, 1024*1024)
+	require.NoError(t, err)
+
+	// Store a file so the user directory exists
+	_, err = manager.Store("testuser", "testfile.txt", []byte("data"))
+	require.NoError(t, err)
+
+	// Create a file outside the user directory that must not be reachable
+	secretPath := filepath.Join(tempDir, "secret.txt")
+	require.NoError(t, os.WriteFile(secretPath, []byte("secret"), 0600))
+
+	// Path traversal via file ID must be rejected
+	_, err = manager.Retrieve("testuser", "../secret.txt")
+	require.Error(t, err)
+	assert.Equal(t, ErrPathTraversal, err)
+
+	// Parent directory reference must be rejected
+	_, err = manager.Retrieve("testuser", "..")
+	require.Error(t, err)
+	assert.Equal(t, ErrPathTraversal, err)
+
+	// Path traversal with backslashes must be rejected
+	_, err = manager.Retrieve("testuser", `..\secret.txt`)
+	require.Error(t, err)
+	assert.Equal(t, ErrPathTraversal, err)
+}
+
+func TestStore_FilePermissions(t *testing.T) {
+	t.Parallel()
+
+	tempDir, err := os.MkdirTemp("", "spool-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	manager, err := NewManager(tempDir, 1024*1024)
+	require.NoError(t, err)
+
+	fileRef, err := manager.Store("testuser", "testfile.txt", []byte("data"))
+	require.NoError(t, err)
+
+	info, err := os.Stat(fileRef.Path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+}
+
+func TestFinishUpload_FilePermissions(t *testing.T) {
+	t.Parallel()
+
+	tempDir, err := os.MkdirTemp("", "spool-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	manager, err := NewManager(tempDir, 1024*1024)
+	require.NoError(t, err)
+
+	uploadManager := manager.GetUploadManager()
+	ctx := context.Background()
+
+	upload, err := uploadManager.StartUpload(ctx, "testuser", "testfile.txt", "/target", 10, 1024*1024)
+	require.NoError(t, err)
+
+	_, err = uploadManager.WriteChunk(upload, []byte("1234567890"))
+	require.NoError(t, err)
+
+	fileRef, err := uploadManager.FinishUpload(upload)
+	require.NoError(t, err)
+
+	info, err := os.Stat(fileRef.Path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
 }
 
 func TestStoreStream(t *testing.T) {
@@ -852,4 +932,61 @@ func TestGetPendingFiles(t *testing.T) {
 	for _, file := range pending {
 		assert.Equal(t, FileStatusCommitted, file.Status)
 	}
+}
+func TestStartUpload_RejectsAccountMaxSizeAboveInt64(t *testing.T) {
+	t.Parallel()
+
+	tempDir, err := os.MkdirTemp("", "spool-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	manager, err := NewManager(tempDir, 1024*1024)
+	require.NoError(t, err)
+
+	uploadManager := manager.GetUploadManager()
+	ctx := context.Background()
+
+	// accountMaxSize above math.MaxInt64 would overflow int64 conversions in
+	// WriteChunk and silently block all uploads; reject it at the boundary.
+	_, err = uploadManager.StartUpload(ctx, "testuser", "file.txt", "/target", 100, math.MaxInt64+1)
+	require.ErrorIs(t, err, ErrInvalidParameters)
+
+	// math.MaxInt64 itself is valid
+	upload, err := uploadManager.StartUpload(ctx, "testuser", "file.txt", "/target", 100, math.MaxInt64)
+	require.NoError(t, err)
+	require.NotNil(t, upload)
+}
+
+// TestUploadFlow_UnknownSize verifies that an upload started with an unknown
+// size (expectedSize < 0, as used by the FTP driver for STOR) can receive
+// chunks and finish successfully.
+func TestUploadFlow_UnknownSize(t *testing.T) {
+	t.Parallel()
+
+	tempDir, err := os.MkdirTemp("", "spool-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	manager, err := NewManager(tempDir, 1024*1024)
+	require.NoError(t, err)
+
+	uploadManager := manager.GetUploadManager()
+	ctx := context.Background()
+
+	upload, err := uploadManager.StartUpload(ctx, "testuser", "file.txt", "/target", -1, 1024*1024)
+	require.NoError(t, err)
+	require.NotNil(t, upload)
+
+	data := []byte("hello world")
+	_, err = uploadManager.WriteChunk(upload, data)
+	require.NoError(t, err)
+
+	fileRef, err := uploadManager.FinishUpload(upload)
+	require.NoError(t, err)
+	assert.Equal(t, int64(len(data)), fileRef.Size)
+
+	// The spooled file must contain the written data
+	spooled, err := os.ReadFile(fileRef.Path)
+	require.NoError(t, err)
+	assert.Equal(t, data, spooled)
 }

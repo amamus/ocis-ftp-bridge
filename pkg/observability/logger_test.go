@@ -2,6 +2,8 @@ package observability
 
 import (
 	"log/slog"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/amamus/ocis-ftp-bridge/pkg/config"
@@ -244,4 +246,33 @@ func TestGlobalLogger(t *testing.T) {
 	// Test package-level functions use the global logger
 	Info("test info")
 	Error("test error")
+}
+
+func TestGetOutputWriter_FilePermissions(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "logger-test")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	logPath := filepath.Join(tempDir, "test.log")
+	file, err := getOutputWriter(logPath)
+	if err != nil {
+		t.Fatalf("getOutputWriter() failed: %v", err)
+	}
+
+	if _, err := file.WriteString("test log entry\n"); err != nil {
+		t.Fatalf("failed to write to log file: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("failed to close log file: %v", err)
+	}
+
+	info, err := os.Stat(logPath)
+	if err != nil {
+		t.Fatalf("failed to stat log file: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("expected log file permissions 0600, got %o", perm)
+	}
 }

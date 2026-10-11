@@ -184,7 +184,9 @@ func (m *Monitor) calculateCurrentUsage() (usedBytes uint64, fileCount uint64, e
 			return nil
 		}
 
-		totalBytes += uint64(info.Size())
+		if size := info.Size(); size > 0 {
+			totalBytes += uint64(size)
+		}
 		totalFiles++
 
 		return nil

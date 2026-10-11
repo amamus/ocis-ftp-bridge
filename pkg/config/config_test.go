@@ -94,6 +94,9 @@ func TestInvalidConfigurations(t *testing.T) {
 		"bad collision":    strings.Replace(base, "collision_policy: rename", "collision_policy: surprise", 1),
 		"relative spool":   strings.Replace(base, "/var/lib/ocis-ftp/spool", "relative/spool", 1),
 		"missing target":   strings.Replace(base, "drive: Incoming Scans", "drive: \"\"", 1),
+		// max_size above math.MaxInt64 would overflow int64 conversions in the
+		// upload hot path and silently block all uploads for the account
+		"oversized max_size": strings.Replace(base, "max_size: 250MiB", "max_size: 9223372036854775808", 1),
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -528,5 +531,24 @@ func TestValidateServerListenAddress(t *testing.T) {
 				t.Errorf("expected %q to be invalid", addr)
 			}
 		})
+	}
+}
+
+// TestParseArgon2IDDigestLengthLimit verifies that absurd digest lengths are
+// rejected: VerifyPassword derives the key with argon2.IDKey using the digest
+// length as the key length, so an oversized digest from a malicious config
+// would cause a huge allocation (and the uint32 conversion could overflow).
+func TestParseArgon2IDDigestLengthLimit(t *testing.T) {
+	salt := base64.RawStdEncoding.EncodeToString([]byte("0123456789abcdef"))
+	build := func(digestLen int) string {
+		return "$argon2id$v=19$m=8192,t=1,p=1$" + salt + "$" +
+			base64.RawStdEncoding.EncodeToString(make([]byte, digestLen))
+	}
+
+	if _, err := parseArgon2ID(build(4096)); err != nil {
+		t.Fatalf("expected 4096-byte digest to be accepted, got %v", err)
+	}
+	if _, err := parseArgon2ID(build(4097)); err == nil {
+		t.Fatal("expected 4097-byte digest to be rejected")
 	}
 }

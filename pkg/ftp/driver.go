@@ -249,7 +249,11 @@ type BridgeDriver struct {
 
 	// Account management
 	accounts map[string]*config.AccountConfig
-	
+
+	// Active client sessions, keyed by connection ID. Used to cancel the
+	// per-session context when the client disconnects.
+	clients map[uint32]*bridgeClientDriver
+
 	// Rate limiting
 	connectionTracker *ConnectionTracker
 	authAttemptTracker *AuthAttemptTracker
@@ -315,6 +319,7 @@ func NewBridgeDriver(
 		graphClient:   graphClient,
 		transferManager: transferMgr,
 		accounts:      accounts,
+		clients:       make(map[uint32]*bridgeClientDriver),
 		maxConnections: cfg.Server.MaxConnections,
 		connectionTracker: connTracker,
 		authAttemptTracker: authTracker,
@@ -405,6 +410,11 @@ func (d *BridgeDriver) AuthUser(cc ftpserver.ClientContext, user, password strin
 	// Create a real context for this session
 	clientDriver.context, clientDriver.cancel = context.WithCancel(context.Background())
 
+	// Track the session so its context is cancelled when the client disconnects
+	d.mu.Lock()
+	d.clients[cc.ID()] = clientDriver
+	d.mu.Unlock()
+
 	// Record successful authentication attempt for rate limiting
 	if d.authAttemptTracker != nil {
 		d.authAttemptTracker.RecordAuthAttempt(clientIP, true)
@@ -472,7 +482,10 @@ func (d *BridgeDriver) GetSettings() (*ftpserver.Settings, error) {
 // GetTLSConfig returns TLS configuration for the FTP server.
 func (d *BridgeDriver) GetTLSConfig() (*tls.Config, error) {
 	if !d.cfg.Server.TLS.Enabled {
-		return nil, nil
+		// An error (not nil, nil) is required here: ftpserverlib's AUTH TLS
+		// handler wraps the control connection in tls.Server whenever the error
+		// is nil, and a nil *tls.Config crashes the server on the next read.
+		return nil, fmt.Errorf("TLS is not enabled")
 	}
 
 	// Load certificate and key
@@ -509,6 +522,17 @@ func (d *BridgeDriver) ClientConnected(cc ftpserver.ClientContext) (string, erro
 // Connection slots are released here so they follow the actual socket lifecycle.
 func (d *BridgeDriver) ClientDisconnected(cc ftpserver.ClientContext) {
 	clientIP := extractClientIP(cc.RemoteAddr().String())
+
+	// Cancel the session context so per-connection resources are released
+	d.mu.Lock()
+	clientDriver, registered := d.clients[cc.ID()]
+	if registered {
+		delete(d.clients, cc.ID())
+	}
+	d.mu.Unlock()
+	if registered {
+		clientDriver.cancel()
+	}
 
 	// Release connection slot
 	if d.connectionTracker != nil {
@@ -809,12 +833,17 @@ func (c *bridgeClientDriver) generateUploadID() string {
 func (c *bridgeClientDriver) handleUploadOpen(path string) (*uploadWriter, error) {
 	// Use transfer manager for proper path mapping and collision handling
 	filename := filepath.Base(path)
-	
+
+	// The ftpserver library always passes absolute paths; the transfer manager
+	// expects paths relative to the account's target root (the FTP namespace
+	// root "/" maps to the target root), so strip the leading slash.
+	relDir := strings.TrimPrefix(filepath.Dir(path), "/")
+
 	// Create transfer request
 	request := transfer.TransferRequest{
 		UserID:   c.user,
 		Filename: filename,
-		Path:     filepath.Dir(path),
+		Path:     relDir,
 		Size:     -1, // unknown size initially
 	}
 
@@ -904,6 +933,7 @@ func (w *uploadWriter) Write(p []byte) (n int, err error) {
 	}
 
 	// Check account max size
+	// #nosec G115 -- AccountMaxSize is validated <= math.MaxInt64 in spool StartUpload and config validation
 	if w.upload.BytesReceived+int64(len(p)) > int64(w.upload.AccountMaxSize) {
 		return 0, spool.ErrFileTooLarge
 	}
@@ -968,7 +998,9 @@ func (w *uploadWriter) Close() error {
 
 		// Update metrics
 		atomic.AddUint64(&w.clientDriver.bridgeDriver.uploadsSuccess, 1)
-		atomic.AddUint64(&w.clientDriver.bridgeDriver.totalBytesUploaded, uint64(fileRef.Size))
+		if fileRef.Size > 0 {
+			atomic.AddUint64(&w.clientDriver.bridgeDriver.totalBytesUploaded, uint64(fileRef.Size))
+		}
 
 		// Clean up tracking
 		w.clientDriver.mu.Lock()

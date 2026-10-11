@@ -23,7 +23,7 @@ const (
 	// Authentication and authorization errors
 	ErrCodeUnauthorized   ErrorCode = "UNAUTHORIZED"
 	ErrCodeForbidden      ErrorCode = "FORBIDDEN"
-	ErrCodeInvalidCredentials ErrorCode = "INVALID_CREDENTIALS"
+	ErrCodeInvalidCredentials ErrorCode = "INVALID_CREDENTIALS" // #nosec G101 -- error code constant, not a credential
 	
 	// Configuration errors
 	ErrCodeInvalidConfig  ErrorCode = "INVALID_CONFIG"
