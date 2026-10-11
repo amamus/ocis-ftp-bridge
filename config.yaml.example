@@ -44,6 +44,25 @@ server:
     # Required when enabled: true
     key: "/etc/ssl/private/ocis-ftp-bridge.key"
 
+  # ==========================================================================
+  # Rate Limiting Configuration
+  # ==========================================================================
+  # Rate limiting protects against brute-force attacks and resource exhaustion
+  rate_limiting:
+    # Maximum connections per IP address (0 = unlimited)
+    max_connections_per_ip: 10
+    
+    # Maximum total concurrent connections (0 = unlimited)
+    max_global_connections: 100
+    
+    # Authentication attempt rate limiting
+    max_auth_attempts_per_ip: 5     # Maximum failed auth attempts per IP
+    auth_attempt_window: 1m        # Time window for counting attempts
+    auth_lockout_duration: 5m      # Duration to lock out IP after exceeding limit
+    
+    # Enable/disable rate limiting (default: true)
+    track_failed_attempts: true
+
 # ============================================================================
 # oCIS Configuration
 # ============================================================================
