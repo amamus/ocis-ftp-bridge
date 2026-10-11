@@ -102,6 +102,21 @@ func TestInvalidConfigurations(t *testing.T) {
 			}
 		})
 	}
+	
+	// Test invalid server listen addresses
+	addressCases := map[string]string{
+		"invalid port":         strings.Replace(base, `":21"`, `":99999"`, 1), // port > 65535
+		"invalid port 0":       strings.Replace(base, `":21"`, `":0"`, 1),    // port = 0
+		"invalid format":       strings.Replace(base, `":21"`, `"localhost"`, 1), // missing port
+		"invalid hostname":     strings.Replace(base, `":21"`, `"invalid host!:80"`, 1), // invalid hostname
+	}
+	for name, body := range addressCases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := loadText(t, body, map[string]string{"OCIS_FTP_RECEPTION_TOKEN": "token"}); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
 	t.Run("duplicate account", func(t *testing.T) {
 		account := strings.SplitN(base, "accounts:\n", 2)[1]
 		body := base + "  - username: reception\n" + strings.Replace(strings.SplitN(account, "  - username: reception\n", 2)[1], "\n    ", "\n    ", -1)
@@ -476,4 +491,42 @@ func TestValidateTLSConfigRSAKeyStrength(t *testing.T) {
 			t.Fatal("1024-bit RSA certificate should be rejected")
 		}
 	})
+}
+
+// TestValidateServerListenAddress verifies that listen address validation
+// accepts various formats including scoped IPv6 with zone identifiers.
+func TestValidateServerListenAddress(t *testing.T) {
+	valid := []string{
+		":2121",
+		"0.0.0.0:2121",
+		"127.0.0.1:2121",
+		"[::]:2121",
+		"[::1]:2121",
+		"[fe80::1%eth0]:2121", // Scoped IPv6 with zone
+		"localhost:2121",
+		"example.com:9200",
+	}
+	for _, addr := range valid {
+		t.Run("valid/"+addr, func(t *testing.T) {
+			if err := validateServerListenAddress(addr); err != nil {
+				t.Errorf("expected %q to be valid, got error: %v", addr, err)
+			}
+		})
+	}
+
+	invalid := []string{
+		"",
+		"noport",
+		":0",
+		":99999",
+		"host:abc",
+		"-bad-.com:2121",
+	}
+	for _, addr := range invalid {
+		t.Run("invalid/"+addr, func(t *testing.T) {
+			if err := validateServerListenAddress(addr); err == nil {
+				t.Errorf("expected %q to be invalid", addr)
+			}
+		})
+	}
 }

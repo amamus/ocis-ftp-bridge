@@ -392,6 +392,9 @@ func (c *Config) validateWithEnv(lookupEnv func(string) (string, bool)) error {
 	if strings.TrimSpace(c.Server.Listen) == "" {
 		return errors.New("server.listen is required")
 	}
+	if err := validateServerListenAddress(c.Server.Listen); err != nil {
+		return fmt.Errorf("server.listen: %w", err)
+	}
 	if err := validatePassive(c.Server.Passive); err != nil {
 		return err
 	}
@@ -607,6 +610,90 @@ func (c *Config) ValidateTLSConfig() error {
 	}
 
 	return nil
+}
+
+// validateServerListenAddress validates the server listen address format.
+// Supports hostname:port, :port, IPv4:port, and [IPv6]:port including
+// scoped IPv6 addresses with zone identifiers (e.g. [fe80::1%eth0]:2121).
+func validateServerListenAddress(addr string) error {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return errors.New("address is required")
+	}
+
+	// Support both hostname:port and :port formats
+	if !strings.Contains(addr, ":") {
+		return fmt.Errorf("invalid address format %q: expected host:port or :port", addr)
+	}
+
+	// Split into host and port parts
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		// If it starts with :, it might be just a port
+		if strings.HasPrefix(addr, ":") {
+			port = strings.TrimPrefix(addr, ":")
+			host = ""
+		} else {
+			return fmt.Errorf("invalid address format %q: %w", addr, err)
+		}
+	}
+
+	// Validate port
+	if port == "" {
+		return errors.New("port is required")
+	}
+	portNum, err := strconv.Atoi(port)
+	if err != nil {
+		return fmt.Errorf("invalid port %q: %w", port, err)
+	}
+	if portNum < 1 || portNum > 65535 {
+		return fmt.Errorf("port %d must be between 1 and 65535", portNum)
+	}
+
+	// Validate host if provided
+	if host != "" && host != "0.0.0.0" && host != "::" && host != "*" {
+		// Strip IPv6 zone identifier (e.g. fe80::1%eth0 -> fe80::1) before parsing
+		hostForParse := host
+		if idx := strings.Index(hostForParse, "%"); idx >= 0 {
+			hostForParse = hostForParse[:idx]
+		}
+		if ip := net.ParseIP(hostForParse); ip == nil {
+			// Check if it's a valid hostname
+			if !isValidHostname(host) {
+				return fmt.Errorf("invalid hostname %q", host)
+			}
+		}
+	}
+
+	return nil
+}
+
+// isValidHostname checks if a string is a valid hostname
+func isValidHostname(hostname string) bool {
+	if len(hostname) > 253 {
+		return false
+	}
+
+	labels := strings.Split(hostname, ".")
+	if len(labels) == 0 {
+		return false
+	}
+
+	for _, label := range labels {
+		if len(label) == 0 || len(label) > 63 {
+			return false
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, r := range label {
+			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-') {
+				return false
+			}
+		}
+	}
+
+	return true
 }
 
 func validatePassive(p PassiveConfig) error {
