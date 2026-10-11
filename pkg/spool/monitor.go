@@ -52,6 +52,16 @@ func (m *Monitor) Start() {
 		return
 	}
 
+	// Validate check interval to prevent time.NewTicker panic
+	if m.config.CheckInterval <= 0 {
+		if m.logger != nil {
+			m.logger.Error("Invalid spool monitoring check interval; using default",
+				"configured", m.config.CheckInterval,
+				"default", 30*time.Second)
+		}
+		m.config.CheckInterval = 30 * time.Second
+	}
+
 	if m.logger != nil {
 		m.logger.Info("Starting spool monitoring",
 			"spool_directory", m.spoolDir,
@@ -163,13 +173,14 @@ func (m *Monitor) calculateCurrentUsage() (usedBytes uint64, fileCount uint64, e
 			return err
 		}
 
-		// Skip directories and temporary files
+		// Skip directories
 		if info.IsDir() {
 			return nil
 		}
 
-		// Skip temporary files
-		if len(info.Name()) > 0 && (info.Name()[0] == '.' || filepath.Ext(info.Name()) == ".tmp") {
+		// Skip hidden files (dotfiles), but include .tmp files:
+		// active uploads are stored as upload-*.tmp and consume disk space.
+		if len(info.Name()) > 0 && info.Name()[0] == '.' {
 			return nil
 		}
 
