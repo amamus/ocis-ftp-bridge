@@ -4,6 +4,7 @@
 package observability
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"sync"
@@ -93,34 +94,37 @@ func DefaultLoggerConfig() config.LoggerConfig {
 // NewLogger creates a new Logger with the given configuration
 func NewLogger(cfg config.LoggerConfig) (*Logger, error) {
 	level := ParseLevel(cfg.Level)
-	
+
+	outputWriter, err := getOutputWriter(cfg.Output)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open log output %q: %w", cfg.Output, err)
+	}
+
 	var handler slog.Handler
-	
+
 	// Create handler based on format
+	handlerOpts := &slog.HandlerOptions{
+		AddSource: cfg.AddSource,
+		Level:     level.SLogLevel(),
+	}
 	switch cfg.Format {
 	case "json":
-		handler = slog.NewJSONHandler(getOutputWriter(cfg.Output), &slog.HandlerOptions{
-			AddSource: cfg.AddSource,
-		})
+		handler = slog.NewJSONHandler(outputWriter, handlerOpts)
 	case "text":
-		handler = slog.NewTextHandler(getOutputWriter(cfg.Output), &slog.HandlerOptions{
-			AddSource: cfg.AddSource,
-		})
+		handler = slog.NewTextHandler(outputWriter, handlerOpts)
 	default:
 		// Default to JSON
-		handler = slog.NewJSONHandler(getOutputWriter(cfg.Output), &slog.HandlerOptions{
-			AddSource: cfg.AddSource,
-		})
+		handler = slog.NewJSONHandler(outputWriter, handlerOpts)
 	}
-	
+
 	// Create slog logger with the handler
 	slogLogger := slog.New(handler)
-	
+
 	// Set the level
 	slogLogger = slogLogger.With(
 		slog.String("logger", "ocis-ftp-bridge"),
 	)
-	
+
 	return &Logger{
 		logger: slogLogger,
 		level:  level,
@@ -128,22 +132,21 @@ func NewLogger(cfg config.LoggerConfig) (*Logger, error) {
 }
 
 // getOutputWriter returns the appropriate writer for the output
-func getOutputWriter(output string) *os.File {
+func getOutputWriter(output string) (*os.File, error) {
 	switch output {
 	case "stdout":
-		return os.Stdout
+		return os.Stdout, nil
 	case "stderr":
-		return os.Stderr
+		return os.Stderr, nil
 	case "":
-		return os.Stdout
+		return os.Stdout, nil
 	default:
 		// For file paths, open the file
 		file, err := os.OpenFile(output, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
-			// Fall back to stdout if file cannot be opened
-			return os.Stdout
+			return nil, err
 		}
-		return file
+		return file, nil
 	}
 }
 
@@ -169,16 +172,18 @@ func (l *Logger) Error(msg string, args ...any) {
 
 // log handles the actual logging with level checking
 func (l *Logger) log(level Level, msg string, args ...any) {
-	if level < l.level {
+	// Read level under lock to synchronize with SetLevel
+	l.mu.Lock()
+	currentLevel := l.level
+	l.mu.Unlock()
+
+	if level < currentLevel {
 		return
 	}
-	
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	
+
 	// Add level to the args
 	allArgs := append([]any{"level", level.String()}, args...)
-	
+
 	l.logger.Log(nil, level.SLogLevel(), msg, allArgs...)
 }
 

@@ -5,6 +5,7 @@ package observability
 
 import (
 	"log/slog"
+	"strings"
 
 	"github.com/amamus/ocis-ftp-bridge/pkg/config"
 )
@@ -98,8 +99,17 @@ func (c *defaultClient) Logger() *Logger {
 
 // Log implements Client.Log (deprecated compatibility method)
 func (c *defaultClient) Log(level, message string) {
-	// Convert old-style log calls to structured logging
-	c.logger.Info(message, slog.String("level", level))
+	// Route to the appropriate logger method to preserve severity
+	switch strings.ToLower(level) {
+	case "debug":
+		c.logger.Debug(message)
+	case "warn", "warning":
+		c.logger.Warn(message)
+	case "error":
+		c.logger.Error(message)
+	default:
+		c.logger.Info(message)
+	}
 }
 
 // Debug implements Client.Debug
