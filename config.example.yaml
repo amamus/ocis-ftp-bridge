@@ -20,7 +20,7 @@ spool:
 
 # HTTP server for health checks and metrics
 http:
-  address: ":9090"  # HTTP server address for health/ready endpoints
+  address: ":9200"  # HTTP server address for health/ready endpoints (must match container port)
   auth:
     enabled: true  # Authentication enabled by default for security
     method: basic  # Authentication method: basic, bearer, or none

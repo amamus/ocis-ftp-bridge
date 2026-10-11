@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -23,26 +24,24 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// generateRandomPassword generates a cryptographically secure random password of the given length
-func generateRandomPassword(length int) string {
+// generateRandomPassword generates a cryptographically secure random password of the given length.
+// It fails closed: if crypto/rand is unavailable, an error is returned rather than
+// falling back to a predictable value.
+func generateRandomPassword(length int) (string, error) {
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*"
 	const charsetLen = len(charset)
-	
+
 	password := make([]byte, length)
 	for i := 0; i < length; i++ {
-		// Use crypto/rand for secure random number generation
-		randomBytes := make([]byte, 4) // 4 bytes = 32 bits of entropy per character
+		randomBytes := make([]byte, 4)
 		if _, err := io.ReadFull(rand.Reader, randomBytes); err != nil {
-			// Fallback to simpler random if crypto/rand fails (shouldn't happen in practice)
-			password[i] = charset[i%charsetLen]
-			continue
+			return "", fmt.Errorf("failed to generate secure random password: %w", err)
 		}
-		// Use modulo to get a valid index
 		index := int(randomBytes[0]) % charsetLen
 		password[i] = charset[index]
 	}
-	
-	return string(password)
+
+	return string(password), nil
 }
 
 // Server provides HTTP operations endpoints
@@ -83,9 +82,9 @@ type OperationsServer struct {
 func BasicAuthMiddleware(username, password string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Skip authentication for health endpoints if configured to allow it
-			if r.URL.Path == "/healthz" {
-				// Allow health checks without authentication for Kubernetes liveness probes
+			// Skip authentication for health and readiness endpoints.
+			// Kubernetes liveness and readiness probes call these without credentials.
+			if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -179,7 +178,7 @@ func BearerAuthMiddleware(token string) func(http.Handler) http.Handler {
 	}
 }
 
-func NewOperationsServer(address string, cfg *config.Config) *OperationsServer {
+func NewOperationsServer(address string, cfg *config.Config) (*OperationsServer, error) {
 	// Create custom registry for our metrics
 	registry := prometheus.NewRegistry()
 
@@ -277,13 +276,27 @@ func NewOperationsServer(address string, cfg *config.Config) *OperationsServer {
 		case "basic":
 			// Generate a random password if none is provided
 			if cfg.HTTP.Auth.Password == "" {
-				// Generate a secure random password
-				cfg.HTTP.Auth.Password = generateRandomPassword(16)
+				generated, err := generateRandomPassword(16)
+				if err != nil {
+					return nil, fmt.Errorf("failed to generate HTTP auth password: %w", err)
+				}
+				cfg.HTTP.Auth.Password = generated
+				slog.Warn("HTTP Basic auth enabled without explicit password; generated one",
+					"username", cfg.HTTP.Auth.Username,
+					"password", generated,
+					"warning", "set http.auth.password explicitly for persistent credentials")
 			}
 			authMiddleware = BasicAuthMiddleware(cfg.HTTP.Auth.Username, cfg.HTTP.Auth.Password)
 		case "bearer":
 			if cfg.HTTP.Auth.BearerToken == "" {
-				cfg.HTTP.Auth.BearerToken = generateRandomPassword(32)
+				generated, err := generateRandomPassword(32)
+				if err != nil {
+					return nil, fmt.Errorf("failed to generate HTTP bearer token: %w", err)
+				}
+				cfg.HTTP.Auth.BearerToken = generated
+				slog.Warn("HTTP Bearer auth enabled without explicit token; generated one",
+					"token", generated,
+					"warning", "set http.auth.bearer_token explicitly for persistent credentials")
 			}
 			authMiddleware = BearerAuthMiddleware(cfg.HTTP.Auth.BearerToken)
 		default:
@@ -356,7 +369,7 @@ func NewOperationsServer(address string, cfg *config.Config) *OperationsServer {
 		Handler: finalHandler,
 	}
 
-	return s
+	return s, nil
 }
 
 // Run starts the HTTP server

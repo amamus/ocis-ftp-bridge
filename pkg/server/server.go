@@ -81,7 +81,10 @@ func New(cfg *config.Config, obs observability.Client) (Server, error) {
 	ftpServer := ftp.NewServer(ftpDriver)
 
 	// Initialize HTTP operations server
-	httpServer := http.NewOperationsServer(cfg.HTTP.Address, cfg)
+	httpServer, err := http.NewOperationsServer(cfg.HTTP.Address, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HTTP operations server: %w", err)
+	}
 
 	return &service{
 		cfg:            cfg,
