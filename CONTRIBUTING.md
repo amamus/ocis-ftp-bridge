@@ -14,8 +14,9 @@ In summary, we expect all contributors to:
 - Gracefully accept constructive criticism
 - Focus on what is best for the project and its users
 
-Violations of the code of conduct may be reported via GitHub issues or discussions
-and will be investigated promptly and fairly.
+Violations of the code of conduct may be reported privately by contacting the
+project maintainers at **security@amamus.net** and will be investigated promptly
+and fairly. Please do not use GitHub issues or discussions for conduct reports.
 
 ## Developer Certificate of Origin (DCO)
 
