@@ -15,6 +15,10 @@ import (
 	libregraph "github.com/owncloud/libre-graph-api-go"
 )
 
+// graphOpTimeout bounds a single Graph API call (small JSON requests) now
+// that the HTTP client no longer has a total request Timeout (PERF-001).
+var graphOpTimeout = 30 * time.Second
+
 // libregraphClient is the concrete implementation of Client using the official SDK.
 type libregraphClient struct {
 	apiClient *libregraph.APIClient
@@ -35,9 +39,10 @@ func NewLibreGraphClient(baseURL, username, token string) Client {
 // This allows for custom timeouts, transport configurations, etc.
 func NewLibreGraphClientWithHTTP(baseURL, username, token string, httpClient *http.Client) Client {
 	if httpClient == nil {
-		// Use reasonable defaults for production use
+		// Use reasonable defaults for production use. There is deliberately
+		// no total Timeout: it is replaced by per-call context deadlines (see
+		// callContext) plus the transport-level hang guards (PERF-001).
 		httpClient = &http.Client{
-			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
 				MaxIdleConns:          10,
 				MaxIdleConnsPerHost:   10,
