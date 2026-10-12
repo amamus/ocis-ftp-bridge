@@ -313,6 +313,12 @@ type BridgeDriver struct {
 	connectionTracker *ConnectionTracker
 	authAttemptTracker *AuthAttemptTracker
 
+	// Per-account upload concurrency caps (PERF-004): one semaphore channel
+	// per account username, created lazily with the account's configured
+	// capacity.
+	uploadSlotsMu sync.Mutex
+	uploadSlots   map[string]chan struct{}
+
 	// Sync primitives
 	mu sync.RWMutex
 
@@ -921,6 +927,52 @@ func (c *bridgeClientDriver) generateUploadID() string {
 // Upload Handling
 // =========================================================================
 
+// acquireUploadSlot takes one of the account's concurrent-upload slots
+// (PERF-004). Accounts without a configured cap are unlimited. It fails fast
+// with ErrTooManyConcurrentUploads when the cap is reached, so the FTP client
+// gets an immediate error instead of an ever-growing upload backlog.
+func (d *BridgeDriver) acquireUploadSlot(account *config.AccountConfig) error {
+	max := account.Upload.MaxConcurrentUploads
+	if max <= 0 {
+		return nil
+	}
+	d.uploadSlotsMu.Lock()
+	if d.uploadSlots == nil {
+		d.uploadSlots = make(map[string]chan struct{})
+	}
+	ch, ok := d.uploadSlots[account.Username]
+	if !ok {
+		ch = make(chan struct{}, max)
+		d.uploadSlots[account.Username] = ch
+	}
+	d.uploadSlotsMu.Unlock()
+
+	select {
+	case ch <- struct{}{}:
+		return nil
+	default:
+		return ErrTooManyConcurrentUploads
+	}
+}
+
+// releaseUploadSlot returns one of the account's concurrent-upload slots. It
+// is a no-op for uncapped accounts and for slots that were never taken.
+func (d *BridgeDriver) releaseUploadSlot(account *config.AccountConfig) {
+	if account.Upload.MaxConcurrentUploads <= 0 {
+		return
+	}
+	d.uploadSlotsMu.Lock()
+	ch := d.uploadSlots[account.Username]
+	d.uploadSlotsMu.Unlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case <-ch:
+	default:
+	}
+}
+
 // handleUploadOpen is called when a client sends STOR command
 func (c *bridgeClientDriver) handleUploadOpen(path string) (*uploadWriter, error) {
 	// Use transfer manager for proper path mapping and collision handling
@@ -951,12 +1003,18 @@ func (c *bridgeClientDriver) handleUploadOpen(path string) (*uploadWriter, error
 		return nil, transferResult.Error
 	}
 
+	// Enforce the per-account concurrent upload cap (PERF-004)
+	if err := c.bridgeDriver.acquireUploadSlot(c.account); err != nil {
+		c.bridgeDriver.obs.Log("warn", fmt.Sprintf("Upload rejected for user %s, path %s: %v", c.user, path, err))
+		return nil, err
+	}
+
 	// Generate a unique upload ID
 	uploadID := c.generateUploadID()
 
 	// Start the upload in spool using the resolved target path
 	uploadManager := c.bridgeDriver.spoolManager.GetUploadManager()
-	
+
 	upload, err := uploadManager.StartUpload(
 		c.context,
 		c.user,
@@ -966,6 +1024,7 @@ func (c *bridgeClientDriver) handleUploadOpen(path string) (*uploadWriter, error
 		uint64(c.account.Upload.MaxSize), // account max size
 	)
 	if err != nil {
+		c.bridgeDriver.releaseUploadSlot(c.account)
 		c.bridgeDriver.obs.Log("error", fmt.Sprintf("Failed to start upload for user %s, path %s: %v", c.user, path, err))
 		return nil, err
 	}
@@ -1052,6 +1111,11 @@ func (w *uploadWriter) Write(p []byte) (n int, err error) {
 
 // Close is called when the upload is complete or aborted
 func (w *uploadWriter) Close() error {
+	// Release the per-account upload slot on every Close path: ftpserverlib
+	// closes the file exactly once when the transfer ends (success, write
+	// error, or disconnect) (PERF-004).
+	defer w.clientDriver.bridgeDriver.releaseUploadSlot(w.clientDriver.account)
+
 	// If any chunk write failed the upload is incomplete: abort it instead
 	// of committing a partial file to oCIS
 	if w.writeErr != nil {

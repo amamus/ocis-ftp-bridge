@@ -1427,3 +1427,72 @@ func TestGetSettingsActiveModeConfigurable(t *testing.T) {
 		t.Error("DisableActiveMode = false with allow_active_mode: false, want true (SEC-005)")
 	}
 }
+
+// TestPerAccountUploadConcurrencyCap verifies the per-account cap on
+// concurrent in-flight uploads (PERF-004): with
+// accounts[].upload.max_concurrent_uploads = 1, a second concurrent upload
+// from the same account is rejected with ErrTooManyConcurrentUploads, and the
+// slot is released when the first upload closes.
+func TestPerAccountUploadConcurrencyCap(t *testing.T) {
+	spoolDir := t.TempDir()
+	spoolManager, err := spool.NewManager(spoolDir, 1024*1024)
+	if err != nil {
+		t.Fatalf("failed to create spool manager: %v", err)
+	}
+
+	mock := newMockWebDAVServer(t, nil)
+
+	cfg := config.New()
+	cfg.OCIS.WebDAVURL = mock.URL + "/webdav"
+	cfg.Accounts = []config.AccountConfig{
+		{
+			Username: "test-printer",
+			Target:   config.TargetConfig{DriveID: "test-drive-id", Root: "/"},
+			Upload: config.UploadConfig{
+				CollisionPolicy:      "rename",
+				MaxSize:              1024 * 1024,
+				MaxConcurrentUploads: 1,
+			},
+		},
+	}
+	d := NewBridgeDriver(cfg, noopObs{}, spoolManager)
+	defer d.Shutdown()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	client := &bridgeClientDriver{
+		bridgeDriver: d,
+		account:      &cfg.Accounts[0],
+		user:         "test-printer",
+		spoolUploads: make(map[string]*spoolUpload),
+		webdavClient: webdav.NewClientWithCredentials(mock.URL+"/webdav", "test-printer", "token"),
+		context:      ctx,
+		cancel:       cancel,
+	}
+
+	// First upload takes the only slot
+	fA, err := client.OpenFile("/a.txt", os.O_WRONLY|os.O_CREATE, 0644)
+	if err != nil {
+		t.Fatalf("first OpenFile failed: %v", err)
+	}
+
+	// Second concurrent upload from the same account must be rejected
+	if _, err := client.OpenFile("/b.txt", os.O_WRONLY|os.O_CREATE, 0644); err != ErrTooManyConcurrentUploads {
+		t.Fatalf("second OpenFile = %v, want ErrTooManyConcurrentUploads (PERF-004)", err)
+	}
+
+	// Closing the first upload releases the slot (commit against the mock)
+	if err := fA.Close(); err != nil {
+		t.Fatalf("Close of first upload failed: %v", err)
+	}
+
+	// A new upload must be accepted again
+	fC, err := client.OpenFile("/c.txt", os.O_WRONLY|os.O_CREATE, 0644)
+	if err != nil {
+		t.Fatalf("OpenFile after Close failed: %v (PERF-004)", err)
+	}
+	if err := fC.Close(); err != nil {
+		t.Fatalf("Close of third upload failed: %v", err)
+	}
+}

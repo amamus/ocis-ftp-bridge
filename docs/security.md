@@ -222,10 +222,13 @@ accounts:
   - username: printer1
     upload:
       max_size: 100MiB  # maximum size of a single upload from this account
+      max_concurrent_uploads: 4  # max concurrent in-flight uploads (0 = unlimited)
 ```
 
-There is no per-account concurrency or bandwidth limit; bound concurrent
-uploads with `server.max_connections` and `server.rate_limiting` below.
+`max_concurrent_uploads` caps how many uploads one account may have in
+flight at the same time; further uploads are rejected with an error until a
+slot frees up. There is no per-account bandwidth limit; bound total
+concurrency with `server.max_connections` and `server.rate_limiting` below.
 
 ## Security Features
 
@@ -415,9 +418,9 @@ server:
     track_failed_attempts: true    # Enable auth rate limiting (default: true)
 ```
 
-There are no per-account upload concurrency or bandwidth limits; the controls
-above are the only rate limits. Per-account upload size limits are configured
-under `accounts[].upload.max_size` (see Upload Limits).
+Per-account limits are configured under `accounts[].upload`: `max_size`
+bounds a single upload and `max_concurrent_uploads` bounds concurrent
+in-flight uploads (0 = unlimited). There is no per-account bandwidth limit.
 
 ## Security Hardening Checklist
 

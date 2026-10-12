@@ -11,7 +11,9 @@ type Client interface {
 	// ResolveDrive resolves a drive ID to drive information.
 	ResolveDrive(id string) (Drive, error)
 	
-	// ListDrives lists all drives for a user.
+	// ListDrives lists the drives visible to the authenticated user
+	// (/me/drives). userID is informational: the client always authenticates
+	// with the account's own token (QLT-005).
 	ListDrives(userID string) ([]Drive, error)
 	
 	// ResolveSpace resolves a space ID to space information.

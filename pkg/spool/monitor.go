@@ -21,6 +21,9 @@ type Monitor struct {
 	config config.MonitoringConfig
 	// server is the HTTP server for metrics
 	server *http.OperationsServer
+	// usage reports the current spool usage from running counters; when nil
+	// the monitor falls back to walking the spool directory (PERF-003)
+	usage func() (usedBytes, fileCount uint64)
 	// logger for logging messages
 	logger *slog.Logger
 	// stopChan for stopping the monitor
@@ -29,16 +32,18 @@ type Monitor struct {
 	doneChan chan struct{}
 }
 
-// NewMonitor creates a new spool monitor.
-func NewMonitor(spoolDir string, maxSize uint64, cfg config.MonitoringConfig, server *http.OperationsServer) *Monitor {
+// NewMonitor creates a new spool monitor. usage may be nil, in which case the
+// monitor computes usage by walking the spool directory.
+func NewMonitor(spoolDir string, maxSize uint64, cfg config.MonitoringConfig, server *http.OperationsServer, usage func() (usedBytes, fileCount uint64)) *Monitor {
 	return &Monitor{
-		spoolDir:  spoolDir,
-		maxSize:   maxSize,
-		config:    cfg,
-		server:    server,
-		logger:    slog.Default(),
-		stopChan:  make(chan struct{}),
-		doneChan:  make(chan struct{}),
+		spoolDir: spoolDir,
+		maxSize:  maxSize,
+		config:   cfg,
+		server:   server,
+		usage:    usage,
+		logger:   slog.Default(),
+		stopChan: make(chan struct{}),
+		doneChan: make(chan struct{}),
 	}
 }
 
@@ -109,7 +114,7 @@ func (m *Monitor) monitorLoop() {
 // checkSpoolUsage checks the current spool usage and updates metrics.
 func (m *Monitor) checkSpoolUsage() {
 	// Get current usage
-	usedBytes, fileCount, err := m.calculateCurrentUsage()
+	usedBytes, fileCount, err := m.currentUsage()
 	if err != nil {
 		m.logger.Error("Failed to calculate spool usage", "error", err)
 		return
@@ -154,6 +159,17 @@ func (m *Monitor) checkSpoolUsage() {
 				"capacity_bytes", m.maxSize)
 		}
 	}
+}
+
+// currentUsage returns the current spool usage: from the running counters
+// when a usage function is wired (PERF-003, so the periodic check does not
+// walk the directory), otherwise by scanning the spool directory.
+func (m *Monitor) currentUsage() (usedBytes uint64, fileCount uint64, err error) {
+	if m.usage != nil {
+		usedBytes, fileCount = m.usage()
+		return usedBytes, fileCount, nil
+	}
+	return m.calculateCurrentUsage()
 }
 
 // calculateCurrentUsage calculates the current spool usage by scanning the directory.
@@ -212,9 +228,10 @@ type SpoolMonitor interface {
 	CapacityExceeded()
 }
 
-// StartSpoolMonitor starts a spool monitor with the given configuration.
-func StartSpoolMonitor(spoolDir string, maxSize uint64, cfg config.MonitoringConfig, server *http.OperationsServer) SpoolMonitor {
-	monitor := NewMonitor(spoolDir, maxSize, cfg, server)
+// StartSpoolMonitor starts a spool monitor with the given configuration. usage
+// may be nil, in which case the monitor walks the spool directory.
+func StartSpoolMonitor(spoolDir string, maxSize uint64, cfg config.MonitoringConfig, server *http.OperationsServer, usage func() (usedBytes, fileCount uint64)) SpoolMonitor {
+	monitor := NewMonitor(spoolDir, maxSize, cfg, server, usage)
 	monitor.Start()
 	return monitor
 }

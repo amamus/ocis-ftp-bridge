@@ -125,14 +125,13 @@ func (c *libregraphClient) ResolveDrive(id string) (Drive, error) {
 	return c.convertDrive(drive), nil
 }
 
-// ListDrives lists all drives for the authenticated user.
-// When userID is empty, it uses the /me/drives endpoint for the current authenticated user.
-// When userID is provided, it uses the /users/{userID}/drives endpoint.
+// ListDrives lists the drives visible to the authenticated user via the
+// /me/drives endpoint. The bridge always authenticates each account with its
+// own oCIS app token, so the endpoint returns the drives of the user the token
+// belongs to regardless of userID; userID stays accepted for interface
+// compatibility, and an empty userID must keep working for ValidateConfiguration
+// (QLT-005). The SDK has no /users/{userID}/drives endpoint.
 func (c *libregraphClient) ListDrives(userID string) ([]Drive, error) {
-	if userID == "" {
-		return nil, ErrInvalidUserID
-	}
-
 	// Check if apiClient is properly initialized
 	if c.apiClient == nil {
 		return nil, fmt.Errorf("graph client not properly initialized: %w", ErrGraphAPIError)

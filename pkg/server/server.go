@@ -150,7 +150,9 @@ func (s *service) Run(ctx context.Context) error {
 	// /metrics; it is stopped again during shutdown (QLT-003).
 	var spoolMonitor spool.SpoolMonitor
 	if ops, ok := s.httpServer.(*http.OperationsServer); ok {
-		spoolMonitor = spool.StartSpoolMonitor(s.cfg.Spool.Directory, s.cfg.Spool.MaxSize, s.cfg.Spool.Monitoring, ops)
+		// The monitor reports usage from the spool's running counters instead
+		// of walking the spool directory on every check (PERF-003).
+		spoolMonitor = spool.StartSpoolMonitor(s.cfg.Spool.Directory, s.cfg.Spool.MaxSize, s.cfg.Spool.Monitoring, ops, s.spoolManager.CurrentUsage)
 	}
 
 	// Log service startup info
