@@ -7,6 +7,8 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"sync"
 	"time"
@@ -64,6 +66,21 @@ func New(cfg *config.Config, obs observability.Client) (Server, error) {
 	ftpDriver := ftp.NewBridgeDriver(cfg, obs, spoolMgr, graphClient)
 	ftpServer := ftp.NewServer(ftpDriver)
 
+	// If HTTP auth is enabled with the basic method but no password is
+	// configured, generate a random one so the operations endpoints are
+	// protected out of the box (SEC-001). The password is logged once so the
+	// operator can use it; set http.auth.password explicitly to make it
+	// stable across restarts.
+	if cfg.HTTP.Auth.Enabled && cfg.HTTP.Auth.Method == "basic" && cfg.HTTP.Auth.Password == "" {
+		generated, err := generateAuthPassword()
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate http.auth.password: %w", err)
+		}
+		cfg.HTTP.Auth.Password = generated
+		obs.Log("info", fmt.Sprintf("http.auth: generated random password for user %q: %s (set http.auth.password explicitly to make it stable across restarts)",
+			cfg.HTTP.Auth.Username, generated))
+	}
+
 	// Initialize HTTP operations server
 	// For health checks, use oCIS URLs directly without authentication
 	// This assumes that the oCIS server has public health endpoints
@@ -76,7 +93,13 @@ func New(cfg *config.Config, obs observability.Client) (Server, error) {
 		SpoolDirectory: cfg.Spool.Directory,
 		CheckTimeout:   5 * time.Second, // Default timeout
 	}
-	httpServer := http.NewOperationsServer(cfg.HTTP.Address, healthCheckConfig)
+	httpServer := http.NewOperationsServer(cfg.HTTP.Address, http.AuthConfig{
+		Enabled:  cfg.HTTP.Auth.Enabled,
+		Method:   cfg.HTTP.Auth.Method,
+		Username: cfg.HTTP.Auth.Username,
+		Password: cfg.HTTP.Auth.Password,
+		Token:    cfg.HTTP.Auth.BearerToken,
+	}, healthCheckConfig)
 
 	return &service{
 		cfg:            cfg,
@@ -196,3 +219,13 @@ var (
 	ErrServerNotRunning = &ServerError{msg: "server not running"}
 	ErrShutdownFailed   = &ServerError{msg: "server shutdown failed"}
 )
+
+// generateAuthPassword returns a random URL-safe password for the operations
+// HTTP endpoints when http.auth is enabled without an explicit password.
+func generateAuthPassword() (string, error) {
+	buf := make([]byte, 24)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}

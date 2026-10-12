@@ -269,7 +269,10 @@ func (s *OperationsServer) performHealthChecks() (map[string]string, []string) {
 	return checks, failedChecks
 }
 
-func NewOperationsServer(address string, healthConfig HealthCheckConfig) *OperationsServer {
+// NewOperationsServer creates the operations HTTP server. auth protects the
+// /readyz and /metrics endpoints; /healthz (liveness, consumed by docker/k8s
+// probes) stays unauthenticated by design.
+func NewOperationsServer(address string, auth AuthConfig, healthConfig HealthCheckConfig) *OperationsServer {
 	// Create custom registry for our metrics
 	registry := prometheus.NewRegistry()
 
@@ -430,8 +433,9 @@ func NewOperationsServer(address string, healthConfig HealthCheckConfig) *Operat
 		w.Write([]byte(`{"status":"live","timestamp":` + getCurrentTimestamp() + `}`))
 	})
 
-	// Readiness endpoint
-	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+	// Readiness endpoint (authenticated: exposes oCIS/WebDAV connectivity
+	// details and spool state)
+	mux.Handle("/readyz", auth.middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Honor explicitly disabled readiness state (SetReady(false))
 		if atomic.LoadInt32(&s.ready) == 0 {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -495,12 +499,12 @@ func NewOperationsServer(address string, healthConfig HealthCheckConfig) *Operat
 		
 		response := fmt.Sprintf(`{"status":"ready","checks":%s,"timestamp":%s}`, checksJSON, getCurrentTimestamp())
 		w.Write([]byte(response))
-	})
+	})))
 
-	// Metrics endpoint
-	mux.Handle("/metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{
+	// Metrics endpoint (authenticated: exposes process and transfer metrics)
+	mux.Handle("/metrics", auth.middleware(promhttp.HandlerFor(registry, promhttp.HandlerOpts{
 		EnableOpenMetrics: true,
-	}))
+	})))
 
 	s.server = &http.Server{
 		Addr:    address,

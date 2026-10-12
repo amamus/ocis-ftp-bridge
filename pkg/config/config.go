@@ -247,9 +247,13 @@ func New() *Config {
 			},
 		},
 		HTTP: HTTPConfig{
-			Address: ":9090",
+			// Loopback by default: metrics and readiness details must not be
+			// exposed on all interfaces. Production deployments set an
+			// explicit address and front the endpoint with a TLS-terminating
+			// proxy (SEC-001).
+			Address: "127.0.0.1:9090",
 			Auth: HTTPAuthConfig{
-				Enabled: true,  // Authentication enabled by default for security
+				Enabled: true, // Authentication enabled by default for security
 				Method:  "basic",
 				Username: "admin",
 				// Password will be randomly generated on first run if not specified
