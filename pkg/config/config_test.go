@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/argon2"
+	"gopkg.in/yaml.v3"
 )
 
 func testHash(password string) string {
@@ -561,5 +562,30 @@ func TestDefaultHTTPAddressIsLoopback(t *testing.T) {
 	cfg := New()
 	if cfg.HTTP.Address != "127.0.0.1:9090" {
 		t.Errorf("default http.address = %q, want 127.0.0.1:9090 (SEC-001)", cfg.HTTP.Address)
+	}
+}
+
+// TestExampleConfigHashesAreBlocklisted guards QLT-009: the password hashes
+// shipped in config.yaml.example must be rejected by Validate, so a
+// copy-pasted example config fails fast instead of running with publicly
+// known credentials.
+func TestExampleConfigHashesAreBlocklisted(t *testing.T) {
+	data, err := os.ReadFile("../../config.yaml.example")
+	if err != nil {
+		t.Fatalf("failed to read config.yaml.example: %v", err)
+	}
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("config.yaml.example is not valid YAML: %v", err)
+	}
+	t.Setenv("OCIS_APP_TOKEN", "dummy-token")
+	t.Setenv("SCANNER_OCIS_APP_TOKEN", "dummy-token-2")
+
+	err = cfg.Validate()
+	if err == nil {
+		t.Fatal("config.yaml.example validates cleanly; its shipped password hashes must be blocklisted (QLT-009)")
+	}
+	if !strings.Contains(err.Error(), "example/default hash") {
+		t.Errorf("Validate error = %v, want it to reject the example password hashes (QLT-009)", err)
 	}
 }

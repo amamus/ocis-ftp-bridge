@@ -29,6 +29,7 @@ type service struct {
 	cfg          *config.Config
 	obs          observability.Client
 	spoolManager spool.Manager
+	ftpDriver    *ftp.BridgeDriver
 	ftpServer    ftp.Server
 	httpServer   http.Server
 	wg           sync.WaitGroup
@@ -103,6 +104,7 @@ func New(cfg *config.Config, obs observability.Client) (Server, error) {
 		cfg:          cfg,
 		obs:          obs,
 		spoolManager: spoolMgr,
+		ftpDriver:    ftpDriver,
 		ftpServer:    ftpServer,
 		httpServer:   httpServer,
 	}, nil
@@ -209,8 +211,13 @@ func (s *service) stopHTTPServer() error {
 	return s.httpServer.Stop()
 }
 
-// stopFTPServer stops the FTP server.
+// stopFTPServer stops the FTP server. The driver is shut down first so its
+// lifecycle context is cancelled: ftpserverlib's Stop only closes the
+// listeners, but session contexts and transfer managers derive from the
+// driver context, so cancelling it aborts in-flight uploads on SIGTERM
+// (QLT-011).
 func (s *service) stopFTPServer() error {
+	s.ftpDriver.Shutdown()
 	return s.ftpServer.Stop()
 }
 
