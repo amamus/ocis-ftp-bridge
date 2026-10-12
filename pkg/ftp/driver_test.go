@@ -660,6 +660,130 @@ func TestCommitToWebDAVHonorsCollisionPolicy(t *testing.T) {
 	})
 }
 
+// fakeWebDAVClient is a recording webdav.Client fake used to assert which
+// upload method the driver uses when committing a spooled file (SEC-003).
+type fakeWebDAVClient struct {
+	uploadCalls       int
+	uploadStreamCalls int
+	lastStreamPath    string
+	lastStreamSize    int64
+	lastStreamContent []byte
+	lastOverwrite     bool
+	uploadErr         error
+	uploadStreamErr   error
+}
+
+func (f *fakeWebDAVClient) Upload(_ context.Context, _ string, data []byte, overwrite bool) error {
+	f.uploadCalls++
+	f.lastOverwrite = overwrite
+	// Mirror the real client: empty payloads are rejected.
+	if len(data) == 0 {
+		return webdav.ErrEmptyData
+	}
+	return f.uploadErr
+}
+
+func (f *fakeWebDAVClient) UploadStream(_ context.Context, path string, reader io.Reader, size int64, overwrite bool) error {
+	f.uploadStreamCalls++
+	f.lastStreamPath = path
+	f.lastStreamSize = size
+	f.lastOverwrite = overwrite
+	if reader != nil {
+		content, err := io.ReadAll(reader)
+		if err != nil {
+			return err
+		}
+		f.lastStreamContent = content
+	}
+	return f.uploadStreamErr
+}
+
+func (f *fakeWebDAVClient) CreateDirectory(context.Context, string) error { return nil }
+func (f *fakeWebDAVClient) CheckPathExistence(context.Context, string) (bool, error) {
+	return false, nil
+}
+func (f *fakeWebDAVClient) DeleteFile(context.Context, string) error { return nil }
+func (f *fakeWebDAVClient) GetFileInfo(context.Context, string) (webdav.FileInfo, error) {
+	return webdav.FileInfo{}, nil
+}
+func (f *fakeWebDAVClient) ValidateConfiguration(context.Context) error { return nil }
+
+// TestCommitToWebDAVStreamsSpooledFile verifies that committing a spooled
+// upload streams the file to WebDAV instead of reading it fully into memory
+// (SEC-003). A 50 MiB upload with up to 100 concurrent connections would
+// otherwise buffer ~5 GiB transiently and get the container OOM-killed.
+func TestCommitToWebDAVStreamsSpooledFile(t *testing.T) {
+	spoolDir := t.TempDir()
+	spoolManager, err := spool.NewManager(spoolDir, 1024*1024)
+	if err != nil {
+		t.Fatalf("failed to create spool manager: %v", err)
+	}
+
+	setup := func(t *testing.T, content []byte) (*fakeWebDAVClient, *uploadWriter, spool.FileRef) {
+		mock := newMockWebDAVServer(t, nil)
+		_, client := newCollisionTestDriver(t, mock, spoolManager, "rename", "/")
+		fake := &fakeWebDAVClient{}
+		client.webdavClient = fake
+		w := &uploadWriter{
+			clientDriver: client,
+			uploadID:     "upload-1",
+			spoolUpload:  &spoolUpload{path: "/uploads/report.pdf"},
+		}
+		spooledFile := filepath.Join(spoolDir, "spooled-upload")
+		if err := os.WriteFile(spooledFile, content, 0o644); err != nil {
+			t.Fatalf("failed to write spooled file: %v", err)
+		}
+		fileRef := spool.FileRef{
+			UserID:     "test-printer",
+			FileID:     "file-1",
+			Filename:   "report.pdf",
+			Size:       int64(len(content)),
+			Path:       spooledFile,
+			TargetPath: "/uploads/report.pdf",
+		}
+		return fake, w, fileRef
+	}
+
+	t.Run("streams the spooled file instead of buffering it", func(t *testing.T) {
+		content := []byte("scanned document bytes")
+		fake, w, fileRef := setup(t, content)
+		if err := w.commitToWebDAV(fileRef); err != nil {
+			t.Fatalf("commit failed: %v", err)
+		}
+		if fake.uploadCalls != 0 {
+			t.Errorf("expected Upload not to be called, got %d calls (file was buffered into memory)", fake.uploadCalls)
+		}
+		if fake.uploadStreamCalls != 1 {
+			t.Fatalf("expected UploadStream to be called once, got %d", fake.uploadStreamCalls)
+		}
+		if fake.lastStreamPath != "/uploads/report.pdf" {
+			t.Errorf("expected stream path /uploads/report.pdf, got %q", fake.lastStreamPath)
+		}
+		if fake.lastStreamSize != int64(len(content)) {
+			t.Errorf("expected stream size %d, got %d", len(content), fake.lastStreamSize)
+		}
+		if string(fake.lastStreamContent) != string(content) {
+			t.Errorf("streamed content = %q, want %q", fake.lastStreamContent, content)
+		}
+		if !fake.lastOverwrite {
+			t.Error("expected overwrite=false for rename policy")
+		}
+	})
+
+	t.Run("commits an empty spooled file", func(t *testing.T) {
+		fake, w, fileRef := setup(t, nil)
+		if err := w.commitToWebDAV(fileRef); err != nil {
+			t.Fatalf("commit of empty file failed: %v", err)
+		}
+		if fake.uploadStreamCalls != 1 {
+			t.Fatalf("expected UploadStream to be called once, got %d", fake.uploadStreamCalls)
+		}
+		if fake.lastStreamSize != 0 {
+			t.Errorf("expected stream size 0, got %d", fake.lastStreamSize)
+		}
+	})
+}
+
 // TestUploadWriterCloseAbortsAfterWriteError verifies that an upload whose
 // chunk writes failed (e.g. the global spool capacity was exceeded mid
 // transfer, SEC-002) is aborted on Close instead of committing a partial file
