@@ -425,8 +425,9 @@ func (tm *TransferManager) ResolveCollision(basePath, filename string, policy Co
 // EnsureParentDirectories creates all parent directories for a given path
 func (tm *TransferManager) EnsureParentDirectories(targetPath string) error {
 	if tm.webdavClient == nil {
-		// Without WebDAV client, we can't create directories
-		return nil
+		// Fail closed: without a WebDAV client no directories can be
+		// created, and the upload would fail at the PUT with 409 anyway
+		return fmt.Errorf("no WebDAV client configured for directory creation")
 	}
 
 	// Get the parent directory
@@ -438,23 +439,21 @@ func (tm *TransferManager) EnsureParentDirectories(targetPath string) error {
 
 	// Check if parent directory exists
 	exists, err := tm.webdavClient.CheckPathExistence(tm.context, parentDir)
-	if err != nil {
-		// If we can't check, try to create anyway
-		return tm.webdavClient.CreateDirectory(tm.context, parentDir)
+	if err == nil && exists {
+		return nil
 	}
 
-	if !exists {
-		// Create the parent directory (and any missing parents)
-		return tm.createParentDirectoriesRecursive(parentDir)
-	}
-
-	return nil
+	// The parent is missing (or its existence is unknown): create it and any
+	// missing parents recursively. MKCOL is idempotent for collections that
+	// already exist.
+	return tm.createParentDirectoriesRecursive(parentDir)
 }
 
 // createParentDirectoriesRecursive creates all parent directories recursively
 func (tm *TransferManager) createParentDirectoriesRecursive(path string) error {
 	if tm.webdavClient == nil {
-		return nil
+		// Fail closed: without a WebDAV client no directories can be created
+		return fmt.Errorf("no WebDAV client configured for directory creation")
 	}
 
 	// Get the parent of this path
