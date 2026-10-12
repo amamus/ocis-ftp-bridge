@@ -1042,3 +1042,68 @@ func TestResolveDriveForAccountCacheIsPerAccount(t *testing.T) {
 		t.Errorf("Graph API called %d times for 2 accounts with one repeat, want 2 (per-account cache, PERF-002)", got)
 	}
 }
+
+// TestResolveDriveForAccountCacheExpiresAfterTTL verifies the cache TTL:
+// after expiry the drive is re-resolved against the Graph API.
+func TestResolveDriveForAccountCacheExpiresAfterTTL(t *testing.T) {
+	var calls int32
+	graphSrv := countingGraphServer(t, &calls)
+	defer graphSrv.Close()
+
+	cfg := config.New()
+	cfg.OCIS.GraphURL = graphSrv.URL
+	d := NewBridgeDriver(cfg, noopObs{}, nil, nil)
+	account := driveCacheTestAccount("test-printer")
+
+	oldTTL := driveResolutionCacheTTL
+	driveResolutionCacheTTL = 50 * time.Millisecond
+	defer func() { driveResolutionCacheTTL = oldTTL }()
+
+	if _, err := d.resolveDriveForAccount(account); err != nil {
+		t.Fatalf("first resolveDriveForAccount failed: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	if _, err := d.resolveDriveForAccount(account); err != nil {
+		t.Fatalf("second resolveDriveForAccount failed: %v", err)
+	}
+
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Errorf("Graph API called %d times after cache expiry, want 2 (re-resolved, PERF-002)", got)
+	}
+}
+
+// TestResolveDriveForAccountDoesNotCacheErrors guards PERF-002: a failed
+// resolution (e.g. 401 revoked app token or 404 deleted drive) must not be
+// cached — the next login re-resolves against the Graph API.
+func TestResolveDriveForAccountDoesNotCacheErrors(t *testing.T) {
+	var calls int32
+	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			// First call: drive deleted (404).
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"test-drive-id","name":"Test Drive","driveType":"personal","webUrl":"http://localhost/webdav"}`))
+	}))
+	defer graphSrv.Close()
+
+	cfg := config.New()
+	cfg.OCIS.GraphURL = graphSrv.URL
+	d := NewBridgeDriver(cfg, noopObs{}, nil, nil)
+	account := driveCacheTestAccount("test-printer")
+
+	if _, err := d.resolveDriveForAccount(account); err == nil {
+		t.Fatal("first resolveDriveForAccount = nil error, want 404 drive-not-found error")
+	}
+	drive, err := d.resolveDriveForAccount(account)
+	if err != nil {
+		t.Fatalf("second resolveDriveForAccount = %v, want success after re-resolve (errors must not be cached, PERF-002)", err)
+	}
+	if drive.ID != "test-drive-id" {
+		t.Errorf("resolved drive ID = %q, want %q", drive.ID, "test-drive-id")
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Errorf("Graph API called %d times, want 2 (error not cached, PERF-002)", got)
+	}
+}
