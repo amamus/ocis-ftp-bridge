@@ -419,6 +419,12 @@ func (m *mockWebDAVServer) lastPUTHeader() http.Header {
 	return m.putHeaders[len(m.putHeaders)-1]
 }
 
+func (m *mockWebDAVServer) putCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.putHeaders)
+}
+
 // newCollisionTestDriver builds a BridgeDriver whose accounts resolve against
 // the mock WebDAV server, plus a session client for the given account.
 func newCollisionTestDriver(t *testing.T, mock *mockWebDAVServer, spoolManager spool.Manager, policy, root string) (*BridgeDriver, *bridgeClientDriver) {
@@ -443,6 +449,7 @@ func newCollisionTestDriver(t *testing.T, mock *mockWebDAVServer, spoolManager s
 		user:         "test-printer",
 		currentDir:   "/",
 		spoolUploads: make(map[string]*spoolUpload),
+		webdavClient: webdav.NewClientWithCredentials(mock.URL+"/webdav", "test-printer", "token"),
 		context:      ctx,
 		cancel:       cancel,
 	}
@@ -555,7 +562,6 @@ func TestCommitToWebDAVHonorsCollisionPolicy(t *testing.T) {
 	setup := func(t *testing.T, policy string, existing map[string][]byte) (*mockWebDAVServer, *uploadWriter, spool.FileRef) {
 		mock := newMockWebDAVServer(t, existing)
 		_, client := newCollisionTestDriver(t, mock, spoolManager, policy, "/")
-		client.webdavClient = webdav.NewClientWithCredentials(mock.URL+"/webdav", "test-printer", "token")
 		w := &uploadWriter{
 			clientDriver: client,
 			uploadID:     "upload-1",
@@ -605,4 +611,69 @@ func TestCommitToWebDAVHonorsCollisionPolicy(t *testing.T) {
 			t.Errorf("expected object to be replaced, content = %q", got)
 		}
 	})
+}
+
+// TestUploadWriterCloseAbortsAfterWriteError verifies that an upload whose
+// chunk writes failed (e.g. the global spool capacity was exceeded mid
+// transfer, SEC-002) is aborted on Close instead of committing a partial file
+// to oCIS.
+func TestUploadWriterCloseAbortsAfterWriteError(t *testing.T) {
+	mock := newMockWebDAVServer(t, nil)
+
+	// Small global spool capacity: 1000 bytes
+	spoolDir := t.TempDir()
+	spoolManager, err := spool.NewManager(spoolDir, 1000)
+	if err != nil {
+		t.Fatalf("failed to create spool manager: %v", err)
+	}
+
+	_, client := newCollisionTestDriver(t, mock, spoolManager, "overwrite", "/")
+
+	// First upload: write 600 bytes, then a chunk that exceeds the remaining
+	// 400 bytes of global spool capacity
+	w, err := client.handleUploadOpen("/big.bin")
+	if err != nil {
+		t.Fatalf("handleUploadOpen failed: %v", err)
+	}
+	if _, err := w.Write(make([]byte, 600)); err != nil {
+		t.Fatalf("first write failed: %v", err)
+	}
+	if _, err := w.Write(make([]byte, 500)); err == nil {
+		t.Fatal("expected write to fail when global spool capacity is exceeded")
+	}
+
+	// Closing the failed upload must abort it: no partial file may be
+	// committed to WebDAV and no bytes may leak in the spool
+	closeErr := w.Close()
+	if closeErr == nil {
+		t.Fatal("expected Close to report the write error")
+	}
+	if got := mock.putCount(); got != 0 {
+		t.Errorf("expected no WebDAV PUT for an aborted upload, got %d", got)
+	}
+	files, err := spoolManager.ListAll()
+	if err != nil {
+		t.Fatalf("failed to list spool files: %v", err)
+	}
+	if len(files) != 0 {
+		t.Errorf("expected spool to be empty after abort, found %d files", len(files))
+	}
+
+	// A healthy upload in the freed capacity still commits normally
+	w2, err := client.handleUploadOpen("/ok.bin")
+	if err != nil {
+		t.Fatalf("handleUploadOpen failed: %v", err)
+	}
+	if _, err := w2.Write(make([]byte, 500)); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	if err := w2.Close(); err != nil {
+		t.Fatalf("Close failed for healthy upload: %v", err)
+	}
+	if got := mock.putCount(); got != 1 {
+		t.Errorf("expected exactly one WebDAV PUT for the healthy upload, got %d", got)
+	}
+	if !mock.fileExists("/ok.bin") {
+		t.Error("expected /ok.bin to be committed to WebDAV")
+	}
 }

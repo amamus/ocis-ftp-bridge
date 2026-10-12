@@ -932,6 +932,9 @@ type uploadWriter struct {
 	upload       *spool.Upload
 	spoolUpload  *spoolUpload
 	bytesWritten int64
+	// writeErr is the first chunk write error, if any. Close aborts the
+	// upload instead of committing a partial file when it is set.
+	writeErr error
 }
 
 // Write implements io.Writer interface
@@ -961,6 +964,11 @@ func (w *uploadWriter) Write(p []byte) (n int, err error) {
 	// Write to spool
 	n, err = w.clientDriver.bridgeDriver.spoolManager.GetUploadManager().WriteChunk(w.upload, p)
 	if err != nil {
+		// Remember the first write error so Close aborts the upload instead
+		// of committing a partial file
+		if w.writeErr == nil {
+			w.writeErr = err
+		}
 		w.clientDriver.bridgeDriver.obs.Log("error", fmt.Sprintf("Upload write failed for user %s, upload %s: %v", w.clientDriver.user, w.uploadID, err))
 		return n, err
 	}
@@ -973,6 +981,24 @@ func (w *uploadWriter) Write(p []byte) (n int, err error) {
 
 // Close is called when the upload is complete or aborted
 func (w *uploadWriter) Close() error {
+	// If any chunk write failed the upload is incomplete: abort it instead
+	// of committing a partial file to oCIS
+	if w.writeErr != nil {
+		w.clientDriver.bridgeDriver.obs.Log("warn", fmt.Sprintf("Aborting upload %s for user %s after write error: %v",
+			w.uploadID, w.clientDriver.user, w.writeErr))
+		if err := w.clientDriver.bridgeDriver.spoolManager.GetUploadManager().AbortUpload(w.upload); err != nil {
+			w.clientDriver.bridgeDriver.obs.Log("warn", fmt.Sprintf("Upload abort failed for user %s, upload %s: %v", w.clientDriver.user, w.uploadID, err))
+		}
+
+		// Clean up tracking
+		w.clientDriver.mu.Lock()
+		delete(w.clientDriver.spoolUploads, w.uploadID)
+		w.clientDriver.mu.Unlock()
+
+		atomic.AddUint64(&w.clientDriver.bridgeDriver.uploadsFailed, 1)
+		return w.writeErr
+	}
+
 	// Try to finish the upload
 	if w.upload.BytesReceived == w.upload.Size || w.upload.Size <= 0 {
 		// If we don't know the size or we've received all data, finish the upload
