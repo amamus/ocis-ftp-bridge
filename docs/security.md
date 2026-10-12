@@ -594,8 +594,9 @@ metadata:
   labels:
     app: ocis-ftp-bridge
 spec:
-  # The spool volume is ReadWriteOnce: run a single replica. Scale by
-  # adding more bridges with separate spool volumes, not by adding replicas.
+  # Replica count is managed by the HPA. Multi-replica is safe: the spool
+  # is a per-replica emptyDir and the FTP Service pins sessions with
+  # sessionAffinity: ClientIP (docs/adr/0001-multi-replica-scaling.md).
   replicas: 1
   selector:
     matchLabels:
@@ -691,9 +692,10 @@ spec:
       - name: config
         configMap:
           name: ftp-bridge-config
+      # Per-replica spool: uploads are pushed to oCIS within the session,
+      # so the spool never needs sharing between replicas.
       - name: spool
-        persistentVolumeClaim:
-          claimName: ftp-bridge-spool
+        emptyDir: {}
       - name: secrets
         secret:
           secretName: ftp-bridge-secrets
@@ -737,6 +739,9 @@ metadata:
   name: ocis-ftp-bridge-ftp
 spec:
   type: ClusterIP
+  # FTP sessions are long-lived; pin each client to one pod so control and
+  # passive data connections stay together in multi-replica operation.
+  sessionAffinity: ClientIP
   selector:
     app: ocis-ftp-bridge
   ports:

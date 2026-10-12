@@ -48,6 +48,9 @@ data:
   config.yaml: |
     server:
       listen: ":2121"
+      # Connection and rate limits are enforced per bridge instance: with
+      # N replicas the effective limit is N times the configured value
+      # (see docs/adr/0001-multi-replica-scaling.md).
       max_connections: 100
       passive:
         min_port: 40000
@@ -96,24 +99,6 @@ data:
     #       max_size: 100MiB
 
 ---
-# Persistent Volume Claim for spool storage
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: ocis-ftp-bridge-spool
-  namespace: ocis-ftp-bridge
-  labels:
-    app: ocis-ftp-bridge
-
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 10Gi
-  storageClassName: standard  # Adjust to your cluster's storage class
-
----
 # Deployment
 apiVersion: apps/v1
 kind: Deployment
@@ -125,8 +110,10 @@ metadata:
     component: ftp-bridge
 
 spec:
-  # Single replica: the spool PVC is ReadWriteOnce and rate limits are
-  # per-instance, so the bridge is not multi-replica safe yet (issue #71).
+  # Replica count is managed by the HPA below (min 1, max 3). Multi-replica
+  # is safe: the spool is a per-replica emptyDir and FTP sessions are pinned
+  # to a pod by the Services' sessionAffinity: ClientIP
+  # (docs/adr/0001-multi-replica-scaling.md, issue #71).
   replicas: 1
 
   selector:
@@ -249,9 +236,13 @@ spec:
       - name: tls-certs
         secret:
           secretName: ocis-ftp-bridge-tls
+      # The spool is a per-replica emptyDir: uploads are pushed to oCIS
+      # within the FTP session, so the spool never needs sharing between
+      # replicas. The in-bridge spool monitor enforces max_total_size per
+      # instance. Trade-off: a pod crash loses that pod's in-flight
+      # uploads; FTP has no resume, so the printer simply retries.
       - name: spool
-        persistentVolumeClaim:
-          claimName: ocis-ftp-bridge-spool
+        emptyDir: {}
       - name: tmp
         emptyDir:
           sizeLimit: 100Mi
@@ -269,6 +260,9 @@ metadata:
 
 spec:
   type: LoadBalancer
+  # FTP sessions are long-lived and cannot be rebalanced; pin each client
+  # to one pod so control and data connections stay together (issue #71).
+  sessionAffinity: ClientIP
   selector:
     app: ocis-ftp-bridge
     component: ftp-bridge
@@ -317,6 +311,10 @@ metadata:
 
 spec:
   type: LoadBalancer
+  # Pin passive data connections the same way as the control connection:
+  # ClientIP affinity hashes the same client IP to the same pod on both
+  # Services (issue #71).
+  sessionAffinity: ClientIP
   selector:
     app: ocis-ftp-bridge
     component: ftp-bridge
@@ -351,9 +349,11 @@ spec:
     name: ocis-ftp-bridge
   
   minReplicas: 1
-  # The spool PVC is ReadWriteOnce and rate limits are per-instance, so the
-  # bridge does not scale horizontally yet (issue #71, QLT-010).
-  maxReplicas: 1
+  # Multi-replica is safe: the spool is a per-replica emptyDir and FTP
+  # sessions are pinned by sessionAffinity: ClientIP. Rate limits and
+  # connection limits are per-instance, so the effective limit scales with
+  # the replica count (docs/adr/0001-multi-replica-scaling.md, issue #71).
+  maxReplicas: 3
   
   metrics:
   - type: Resource

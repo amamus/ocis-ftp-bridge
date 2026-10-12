@@ -175,3 +175,32 @@ func TestSecurityDocMetricNames(t *testing.T) {
 		t.Error("docs/security.md references no ocis_ftp_* metrics; expected the metrics examples to be present")
 	}
 }
+
+// TestScalingDocsMultiReplica guards the multi-replica design documentation
+// (issue #71, QLT-010): docs/architecture.md must document the scaling model
+// (sessionAffinity, per-replica spool, per-instance limits) and reference the
+// ADR that records the decision, and docs/security.md must no longer advise
+// running a single replica.
+func TestScalingDocsMultiReplica(t *testing.T) {
+	doc := string(readRepoFile(t, "docs/architecture.md"))
+	for _, want := range []string{"sessionAffinity", "ClientIP", "emptyDir", "per-instance"} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("docs/architecture.md does not mention %q; the scaling section must document the multi-replica design (issue #71, QLT-010)", want)
+		}
+	}
+	if !strings.Contains(doc, "docs/adr/") {
+		t.Error("docs/architecture.md does not reference the ADR directory; the scaling decision must be recorded in an ADR (issue #71, QLT-010)")
+	}
+
+	adr := string(readRepoFile(t, "docs/adr/0001-multi-replica-scaling.md"))
+	for _, want := range []string{"sessionAffinity", "emptyDir", "per-instance"} {
+		if !strings.Contains(adr, want) {
+			t.Errorf("docs/adr/0001-multi-replica-scaling.md does not record %q; the ADR must document the multi-replica design decision (issue #71, QLT-010)", want)
+		}
+	}
+
+	sec := string(readRepoFile(t, "docs/security.md"))
+	if strings.Contains(sec, "run a single replica") {
+		t.Error("docs/security.md still advises running a single replica; the bridge is multi-replica safe with a per-replica emptyDir spool and sessionAffinity (issue #71, QLT-010)")
+	}
+}
