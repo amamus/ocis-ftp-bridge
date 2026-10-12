@@ -15,8 +15,6 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
-
-	"github.com/amamus/ocis-ftp-bridge/pkg/graph"
 )
 
 // Path validation constants
@@ -73,19 +71,6 @@ func NewWebDAVClientWithHTTP(baseURL, username, token string, httpClient *http.C
 		token:      token,
 		httpClient: httpClient,
 	}
-}
-
-// NewWebDAVClientFromGraph creates a WebDAV client from a resolved graph drive.
-// This is the preferred way to create a WebDAV client once a drive has been resolved.
-// It returns ErrEmptyWebDAVURL when the drive carries no WebDAV URL: silently
-// falling back to a hard-coded host would send the app token to an unintended
-// server, since the client attaches it via Basic auth on every request (SEC-006).
-func NewWebDAVClientFromGraph(drive graph.Drive, username, token string) (Client, error) {
-	if drive.WebDAVURL == "" {
-		return nil, fmt.Errorf("%w: drive %q (%s)", ErrEmptyWebDAVURL, drive.Name, drive.ID)
-	}
-
-	return NewWebDAVClient(drive.WebDAVURL, username, token), nil
 }
 
 // Upload uploads a file to the specified path.

@@ -128,7 +128,7 @@ func TestAuthUserDisconnectCancelsSessionContext(t *testing.T) {
 		},
 	}
 
-	d := NewBridgeDriver(cfg, noopObs{}, nil, nil)
+	d := NewBridgeDriver(cfg, noopObs{}, nil)
 
 	cc := &mockClientContext{
 		id:   42,
@@ -174,7 +174,7 @@ func TestAuthUserDisconnectCancelsSessionContext(t *testing.T) {
 // that never authenticated (or was already removed) is a no-op.
 func TestClientDisconnectedUnknownClient(t *testing.T) {
 	cfg := config.New()
-	d := NewBridgeDriver(cfg, noopObs{}, nil, nil)
+	d := NewBridgeDriver(cfg, noopObs{}, nil)
 
 	cc := &mockClientContext{
 		id:   99,
@@ -227,7 +227,7 @@ func TestConnectionCounterBalancedAcrossSessions(t *testing.T) {
 		},
 	}
 
-	d := NewBridgeDriver(cfg, noopObs{}, nil, nil)
+	d := NewBridgeDriver(cfg, noopObs{}, nil)
 
 	// Run more cumulative login cycles than max_connections: with the
 	// counter leak, logins beyond the 5th are rejected with "server
@@ -292,7 +292,7 @@ func TestGetTLSConfig(t *testing.T) {
 	t.Run("TLS disabled returns error", func(t *testing.T) {
 		cfg := config.New()
 		cfg.Server.TLS.Enabled = false
-		d := NewBridgeDriver(cfg, noopObs{}, nil, nil)
+		d := NewBridgeDriver(cfg, noopObs{}, nil)
 
 		tlsConfig, err := d.GetTLSConfig()
 		if err == nil {
@@ -319,7 +319,7 @@ func TestGetTLSConfig(t *testing.T) {
 		cfg.Server.TLS.Enabled = true
 		cfg.Server.TLS.Cert = certFile
 		cfg.Server.TLS.Key = keyFile
-		d := NewBridgeDriver(cfg, noopObs{}, nil, nil)
+		d := NewBridgeDriver(cfg, noopObs{}, nil)
 
 		tlsConfig, err := d.GetTLSConfig()
 		if err != nil {
@@ -335,7 +335,7 @@ func TestGetTLSConfig(t *testing.T) {
 		cfg.Server.TLS.Enabled = true
 		cfg.Server.TLS.Cert = filepath.Join(t.TempDir(), "nonexistent-cert.pem")
 		cfg.Server.TLS.Key = filepath.Join(t.TempDir(), "nonexistent-key.pem")
-		d := NewBridgeDriver(cfg, noopObs{}, nil, nil)
+		d := NewBridgeDriver(cfg, noopObs{}, nil)
 
 		if _, err := d.GetTLSConfig(); err == nil {
 			t.Fatal("expected error for missing certificate")
@@ -367,7 +367,7 @@ func TestHandleUploadOpenPathMapping(t *testing.T) {
 			Upload:   config.UploadConfig{CollisionPolicy: "rename", MaxSize: 1024 * 1024},
 		},
 	}
-	d := NewBridgeDriver(cfg, noopObs{}, spoolManager, nil)
+	d := NewBridgeDriver(cfg, noopObs{}, spoolManager)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -549,7 +549,7 @@ func newCollisionTestDriver(t *testing.T, mock *mockWebDAVServer, spoolManager s
 			Upload:   config.UploadConfig{CollisionPolicy: policy, MaxSize: 1024 * 1024},
 		},
 	}
-	d := NewBridgeDriver(cfg, noopObs{}, spoolManager, nil)
+	d := NewBridgeDriver(cfg, noopObs{}, spoolManager)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -996,7 +996,7 @@ func TestResolveDriveForAccountCachesResolution(t *testing.T) {
 
 	cfg := config.New()
 	cfg.OCIS.GraphURL = graphSrv.URL
-	d := NewBridgeDriver(cfg, noopObs{}, nil, nil)
+	d := NewBridgeDriver(cfg, noopObs{}, nil)
 	account := driveCacheTestAccount("test-printer")
 
 	first, err := d.resolveDriveForAccount(account)
@@ -1026,7 +1026,7 @@ func TestResolveDriveForAccountCacheIsPerAccount(t *testing.T) {
 
 	cfg := config.New()
 	cfg.OCIS.GraphURL = graphSrv.URL
-	d := NewBridgeDriver(cfg, noopObs{}, nil, nil)
+	d := NewBridgeDriver(cfg, noopObs{}, nil)
 
 	if _, err := d.resolveDriveForAccount(driveCacheTestAccount("printer-a")); err != nil {
 		t.Fatalf("resolve printer-a failed: %v", err)
@@ -1052,7 +1052,7 @@ func TestResolveDriveForAccountCacheExpiresAfterTTL(t *testing.T) {
 
 	cfg := config.New()
 	cfg.OCIS.GraphURL = graphSrv.URL
-	d := NewBridgeDriver(cfg, noopObs{}, nil, nil)
+	d := NewBridgeDriver(cfg, noopObs{}, nil)
 	account := driveCacheTestAccount("test-printer")
 
 	oldTTL := driveResolutionCacheTTL
@@ -1090,7 +1090,7 @@ func TestResolveDriveForAccountDoesNotCacheErrors(t *testing.T) {
 
 	cfg := config.New()
 	cfg.OCIS.GraphURL = graphSrv.URL
-	d := NewBridgeDriver(cfg, noopObs{}, nil, nil)
+	d := NewBridgeDriver(cfg, noopObs{}, nil)
 	account := driveCacheTestAccount("test-printer")
 
 	if _, err := d.resolveDriveForAccount(account); err == nil {

@@ -31,12 +31,6 @@ func TestNewManager(t *testing.T) {
 	// Test GetUploadManager
 	uploadManager := manager.GetUploadManager()
 	require.NotNil(t, uploadManager)
-
-	// Test GetUsage
-	used, capacity, err := manager.GetUsage()
-	require.NoError(t, err)
-	assert.Equal(t, uint64(0), used)
-	assert.Equal(t, uint64(1024*1024), capacity)
 }
 
 func TestNewManager_InvalidDirectory(t *testing.T) {
@@ -510,34 +504,6 @@ func TestGetFileRef(t *testing.T) {
 	_, err = manager.GetFileRef("testuser", "nonexistent")
 	require.Error(t, err)
 	assert.Equal(t, ErrFileNotFound, err)
-}
-
-func TestGetUsage(t *testing.T) {
-	t.Parallel()
-
-	tempDir, err := os.MkdirTemp("", "spool-test")
-	require.NoError(t, err)
-	defer os.RemoveAll(tempDir)
-
-	manager, err := NewManager(tempDir, 1024*1024)
-	require.NoError(t, err)
-
-	// Initially should be 0 usage
-	used, capacity, err := manager.GetUsage()
-	require.NoError(t, err)
-	assert.Equal(t, uint64(0), used)
-	assert.Equal(t, uint64(1024*1024), capacity)
-
-	// Store some files
-	_, err = manager.Store("testuser", "file1.txt", []byte("data1"))
-	require.NoError(t, err)
-	_, err = manager.Store("testuser", "file2.txt", []byte("data2data2"))
-	require.NoError(t, err)
-
-	// Check usage
-	used, _, err = manager.GetUsage()
-	require.NoError(t, err)
-	assert.Equal(t, uint64(15), used) // 5 + 10 bytes (data1 + data2data2)
 }
 
 func TestUploadManager(t *testing.T) {

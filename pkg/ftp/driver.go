@@ -234,7 +234,6 @@ type BridgeDriver struct {
 	cfg          *config.Config
 	obs          observability.Client
 	spoolManager spool.Manager
-	graphClient  graph.Client
 	// transferManagers holds one transfer manager per account, each with a
 	// WebDAV client built from that account's oCIS credentials.
 	transferManagers map[string]*transfer.TransferManager
@@ -280,7 +279,6 @@ func NewBridgeDriver(
 	cfg *config.Config,
 	obs observability.Client,
 	spoolManager spool.Manager,
-	graphClient graph.Client,
 ) *BridgeDriver {
 	// Extract accounts for faster lookup
 	accounts := make(map[string]*config.AccountConfig)
@@ -331,7 +329,6 @@ func NewBridgeDriver(
 		cfg:           cfg,
 		obs:          obs,
 		spoolManager:  spoolManager,
-		graphClient:   graphClient,
 		transferManagers:   transferMgrs,
 		accounts:      accounts,
 		driveCache:    make(map[string]driveCacheEntry),
@@ -809,36 +806,6 @@ func (c *bridgeClientDriver) Chtimes(name string, atime time.Time, mtime time.Ti
 // =========================================================================
 // Path Handling
 // =========================================================================
-
-// normalizeUploadPath normalizes and validates the upload path
-func (c *bridgeClientDriver) normalizeUploadPath(path string) (string, error) {
-	// Convert to absolute path
-	absPath := path
-	if !filepath.IsAbs(absPath) {
-		absPath = filepath.Join("/", absPath)
-	}
-
-	// Clean the path
-	cleanPath := filepath.Clean(absPath)
-
-	// Remove leading slash and ensure it's relative to target root
-	cleanPath = strings.TrimLeft(cleanPath, "/")
-
-	// Combine with account's target root
-	targetPath := filepath.Join(c.account.Target.Root, cleanPath)
-
-	// Validate no path traversal
-	if strings.Contains(targetPath, "..") {
-		return "", ErrPathTraversal
-	}
-
-	// Ensure it's within the target root
-	if !strings.HasPrefix(targetPath, c.account.Target.Root) {
-		return "", ErrPathTraversal
-	}
-
-	return targetPath, nil
-}
 
 // generateUploadID generates a unique upload ID for the client
 func (c *bridgeClientDriver) generateUploadID() string {

@@ -118,9 +118,6 @@ type Manager interface {
 	// GetFileRef retrieves a FileRef by userID and fileID.
 	GetFileRef(userID string, fileID string) (FileRef, error)
 
-	// GetUsage returns the current spool usage and capacity.
-	GetUsage() (used uint64, capacity uint64, err error)
-
 	// MarkPublished marks a file as successfully published to WebDAV.
 	MarkPublished(userID, fileID string) error
 
@@ -921,23 +918,6 @@ func (m *defaultManager) GetFileRef(userID string, fileID string) (FileRef, erro
 	}
 
 	return FileRef{}, ErrFileNotFound
-}
-
-func (m *defaultManager) GetUsage() (used uint64, capacity uint64, err error) {
-	// Calculate actual usage by summing up all files
-	allFiles, err := m.ListAll()
-	if err != nil {
-		return 0, m.maxSize, fmt.Errorf("failed to calculate usage: %w", err)
-	}
-
-	var totalUsed uint64
-	for _, file := range allFiles {
-		if file.Size > 0 {
-			totalUsed += uint64(file.Size)
-		}
-	}
-
-	return totalUsed, m.maxSize, nil
 }
 
 func (m *defaultManager) MarkPublished(userID, fileID string) error {

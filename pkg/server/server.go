@@ -15,11 +15,9 @@ import (
 
 	"github.com/amamus/ocis-ftp-bridge/pkg/config"
 	"github.com/amamus/ocis-ftp-bridge/pkg/ftp"
-	"github.com/amamus/ocis-ftp-bridge/pkg/graph"
 	"github.com/amamus/ocis-ftp-bridge/pkg/http"
 	"github.com/amamus/ocis-ftp-bridge/pkg/observability"
 	"github.com/amamus/ocis-ftp-bridge/pkg/spool"
-	"github.com/amamus/ocis-ftp-bridge/pkg/webdav"
 )
 
 // Server is the main service lifecycle surface.
@@ -28,14 +26,12 @@ type Server interface {
 }
 
 type service struct {
-	cfg            *config.Config
-	obs            observability.Client
-	spoolManager   spool.Manager
-	graphClient    graph.Client
-	webdavClient   webdav.Client
-	ftpServer      ftp.Server
-	httpServer     http.Server
-	wg             sync.WaitGroup
+	cfg          *config.Config
+	obs          observability.Client
+	spoolManager spool.Manager
+	ftpServer    ftp.Server
+	httpServer   http.Server
+	wg           sync.WaitGroup
 }
 
 // New validates configuration and constructs the issue #1 service foundation.
@@ -44,6 +40,12 @@ func New(cfg *config.Config, obs observability.Client) (Server, error) {
 		return nil, ErrInvalidConfig
 	}
 	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidConfig, err)
+	}
+	// Validate the TLS configuration early so a missing, unreadable, or
+	// weak-key certificate fails at startup instead of on the first FTPS
+	// connection (QLT-003).
+	if err := cfg.ValidateTLSConfig(); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidConfig, err)
 	}
 
@@ -56,14 +58,10 @@ func New(cfg *config.Config, obs observability.Client) (Server, error) {
 		return nil, fmt.Errorf("failed to start observability: %w", err)
 	}
 
-	// Create graph client with placeholder credentials (will be configured per-account)
-	graphClient := graph.NewClient(cfg.OCIS.GraphURL, "placeholder-token")
-
-	// Create webdav client with placeholder credentials (will be configured per-account)
-	webdavClient := webdav.NewClient(cfg.OCIS.WebDAVURL, "placeholder-token")
-
-	// Initialize FTP server
-	ftpDriver := ftp.NewBridgeDriver(cfg, obs, spoolMgr, graphClient)
+	// Initialize FTP server. Drive resolution and WebDAV access use
+	// per-account clients built from each account's own oCIS credentials;
+	// there is no service-level client with placeholder credentials (QLT-003).
+	ftpDriver := ftp.NewBridgeDriver(cfg, obs, spoolMgr)
 	ftpServer := ftp.NewServer(ftpDriver)
 
 	// If HTTP auth is enabled with the basic method but no password is
@@ -102,13 +100,11 @@ func New(cfg *config.Config, obs observability.Client) (Server, error) {
 	}, healthCheckConfig)
 
 	return &service{
-		cfg:            cfg,
-		obs:            obs,
-		spoolManager:   spoolMgr,
-		graphClient:    graphClient,
-		webdavClient:   webdavClient,
-		ftpServer:      ftpServer,
-		httpServer:     httpServer,
+		cfg:          cfg,
+		obs:          obs,
+		spoolManager: spoolMgr,
+		ftpServer:    ftpServer,
+		httpServer:   httpServer,
 	}, nil
 }
 
@@ -148,6 +144,13 @@ func (s *service) Run(ctx context.Context) error {
 		}
 	}()
 
+	// Start the spool monitor so spool usage metrics are published on
+	// /metrics; it is stopped again during shutdown (QLT-003).
+	var spoolMonitor spool.SpoolMonitor
+	if ops, ok := s.httpServer.(*http.OperationsServer); ok {
+		spoolMonitor = spool.StartSpoolMonitor(s.cfg.Spool.Directory, s.cfg.Spool.MaxSize, s.cfg.Spool.Monitoring, ops)
+	}
+
 	// Log service startup info
 	s.obs.Log("info", fmt.Sprintf("HTTP operations server started on %s", s.cfg.HTTP.Address))
 	s.obs.Log("info", "Endpoints available: /healthz, /readyz, /metrics")
@@ -156,6 +159,11 @@ func (s *service) Run(ctx context.Context) error {
 	<-ctx.Done()
 
 	s.obs.Log("info", "shutting down ocis-ftp-bridge")
+
+	// Stop the spool monitor
+	if spoolMonitor != nil {
+		spoolMonitor.Stop()
+	}
 
 	// Shutdown FTP server
 	if err := s.stopFTPServer(); err != nil {

@@ -87,5 +87,4 @@ var (
 	ErrFileTooLarge     = &WebDAVError{msg: "file too large"}
 	ErrRateLimited      = &WebDAVError{msg: "rate limited"}
 	ErrTemporaryFailure = &WebDAVError{msg: "temporary server failure"}
-	ErrEmptyWebDAVURL   = &WebDAVError{msg: "drive has no WebDAV URL"}
 )

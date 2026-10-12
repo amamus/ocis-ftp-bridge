@@ -398,6 +398,53 @@ func NewOperationsServer(address string, auth AuthConfig, healthConfig HealthChe
 		[]string{"check"},
 	)
 
+	// Create spool monitoring metrics (QLT-003: the spool monitor publishes
+	// these; without them the monitor's updates would be silently dropped)
+	spoolSizeBytes := prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "ocis_ftp",
+			Subsystem: "spool",
+			Name:      "size_bytes",
+			Help:      "Current spool size in bytes",
+		},
+	)
+
+	spoolFileCount := prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "ocis_ftp",
+			Subsystem: "spool",
+			Name:      "file_count",
+			Help:      "Current number of files in the spool",
+		},
+	)
+
+	spoolCapacityBytes := prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "ocis_ftp",
+			Subsystem: "spool",
+			Name:      "capacity_bytes",
+			Help:      "Configured spool capacity in bytes",
+		},
+	)
+
+	spoolUsagePercent := prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "ocis_ftp",
+			Subsystem: "spool",
+			Name:      "usage_percent",
+			Help:      "Current spool usage as a percentage of the configured capacity",
+		},
+	)
+
+	spoolCapacityExceededTotal := prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: "ocis_ftp",
+			Subsystem: "spool",
+			Name:      "capacity_exceeded_total",
+			Help:      "Total number of times the spool capacity was exceeded",
+		},
+	)
+
 	// Register all metrics
 	registry.MustRegister(
 		ftpSessionsTotal,
@@ -409,6 +456,11 @@ func NewOperationsServer(address string, auth AuthConfig, healthConfig HealthChe
 		ocisRequestsTotal,
 		healthCheckTotal,
 		healthCheckDuration,
+		spoolSizeBytes,
+		spoolFileCount,
+		spoolCapacityBytes,
+		spoolUsagePercent,
+		spoolCapacityExceededTotal,
 	)
 
 	// Create HTTP client for health checks
@@ -426,26 +478,31 @@ func NewOperationsServer(address string, auth AuthConfig, healthConfig HealthChe
 
 	// Create the server struct first so we can reference it in handlers
 	s := &OperationsServer{
-		address:               address,
-		mux:                  mux,
-		healthy:               1,
-		ready:                 1, // Start as ready, can be updated by health checks
-		ocisURL:               healthConfig.OCISURL,
-		ocisUsername:          healthConfig.OCISUsername,
-		ocisPassword:          healthConfig.OCISPassword,
-		webdavURL:             healthConfig.WebDAVURL,
-		spoolDirectory:        healthConfig.SpoolDirectory,
-		checkTimeout:          healthConfig.CheckTimeout,
-		httpClient:            healthCheckHTTPClient,
-		ftpSessionsTotal:      ftpSessionsTotal,
-		ftpActiveSessions:     ftpActiveSessions,
-		ftpUploadsTotal:       ftpUploadsTotal,
-		ftpUploadFailuresTotal: ftpUploadFailuresTotal,
-		ftpUploadBytesTotal:   ftpUploadBytesTotal,
-		ftpUploadDuration:     ftpUploadDuration,
-		ocisRequestsTotal:     ocisRequestsTotal,
-		healthCheckTotal:      healthCheckTotal,
-		healthCheckDuration:   healthCheckDuration,
+		address:                    address,
+		mux:                        mux,
+		healthy:                    1,
+		ready:                      1, // Start as ready, can be updated by health checks
+		ocisURL:                    healthConfig.OCISURL,
+		ocisUsername:               healthConfig.OCISUsername,
+		ocisPassword:               healthConfig.OCISPassword,
+		webdavURL:                  healthConfig.WebDAVURL,
+		spoolDirectory:             healthConfig.SpoolDirectory,
+		checkTimeout:               healthConfig.CheckTimeout,
+		httpClient:                 healthCheckHTTPClient,
+		ftpSessionsTotal:           ftpSessionsTotal,
+		ftpActiveSessions:          ftpActiveSessions,
+		ftpUploadsTotal:            ftpUploadsTotal,
+		ftpUploadFailuresTotal:     ftpUploadFailuresTotal,
+		ftpUploadBytesTotal:        ftpUploadBytesTotal,
+		ftpUploadDuration:          ftpUploadDuration,
+		ocisRequestsTotal:          ocisRequestsTotal,
+		healthCheckTotal:           healthCheckTotal,
+		healthCheckDuration:        healthCheckDuration,
+		SpoolSizeBytes:             spoolSizeBytes,
+		SpoolFileCount:             spoolFileCount,
+		SpoolCapacityBytes:         spoolCapacityBytes,
+		SpoolUsagePercent:          spoolUsagePercent,
+		SpoolCapacityExceededTotal: spoolCapacityExceededTotal,
 	}
 
 	// Health endpoint (liveness)

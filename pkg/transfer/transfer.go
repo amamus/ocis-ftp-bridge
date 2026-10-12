@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -530,28 +529,4 @@ func (tm *TransferManager) ProcessUpload(request TransferRequest) TransferResult
 		Size:       request.Size,
 		Success:    true,
 	}
-}
-
-// Path validation helpers
-
-// isSafePath checks if a path contains only safe characters
-func isSafePath(path string) bool {
-	// Allow alphanumeric, spaces, common punctuation, and Unicode
-	safePattern := regexp.MustCompile(`^[\w\s\-.~/]+$`)
-	return safePattern.MatchString(path)
-}
-
-// Extract components from a path
-func extractPathComponents(path string) []string {
-	if path == "" || path == "." || path == "/" {
-		return []string{}
-	}
-
-	// Remove leading/trailing slashes and split
-	trimmed := strings.Trim(path, "/")
-	if trimmed == "" {
-		return []string{}
-	}
-
-	return strings.Split(trimmed, "/")
 }
