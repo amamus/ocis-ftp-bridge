@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -338,4 +339,20 @@ func TestLibreGraphClient_NotFound(t *testing.T) {
 	_, err := client.ResolveDrive("nonexistent")
 	require.Error(t, err)
 	assert.Equal(t, ErrDriveNotFound, err)
+}
+
+// TestDefaultHTTPClientHasNoTotalTimeout guards PERF-001: dropping the total
+// request Timeout must leave the transport-level hang guards in place.
+func TestDefaultHTTPClientHasNoTotalTimeout(t *testing.T) {
+	t.Parallel()
+
+	client := NewLibreGraphClient("http://example.com/api/libregraph", "user", "token")
+	gc, ok := client.(*libregraphClient)
+	require.True(t, ok, "expected *libregraphClient, got %T", client)
+	assert.Zero(t, gc.httpClient.Timeout,
+		"a total request timeout must not be set on the default Graph client (PERF-001)")
+	transport, ok := gc.httpClient.Transport.(*http.Transport)
+	require.True(t, ok, "expected *http.Transport, got %T", gc.httpClient.Transport)
+	assert.Equal(t, 10*time.Second, transport.ResponseHeaderTimeout,
+		"response header timeout must remain as the hang guard")
 }
