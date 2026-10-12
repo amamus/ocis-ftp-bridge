@@ -1059,3 +1059,76 @@ func TestUploadManager_CapacityReleasedOnFinishAndAbort(t *testing.T) {
 	require.NoError(t, uploadManager.AbortUpload(b))
 	require.NoError(t, uploadManager.AbortUpload(e))
 }
+
+// TestUploadManagerCurrentUsage verifies the running usage counters (PERF-003):
+// bytes and the active-upload count track chunk writes and are released when
+// the upload finishes or is aborted.
+func TestUploadManagerCurrentUsage(t *testing.T) {
+	t.Parallel()
+
+	uploadManager := NewUploadManager(t.TempDir(), 1024*1024)
+	ctx := context.Background()
+
+	used, active := uploadManager.CurrentUsage()
+	assert.Zero(t, used)
+	assert.Zero(t, active)
+
+	upload, err := uploadManager.StartUpload(ctx, "testuser", "testfile.txt", "/target", -1, 1024*1024)
+	require.NoError(t, err)
+
+	used, active = uploadManager.CurrentUsage()
+	assert.Zero(t, used)
+	assert.Equal(t, 1, active)
+
+	_, err = uploadManager.WriteChunk(upload, []byte("1234567890"))
+	require.NoError(t, err)
+
+	used, active = uploadManager.CurrentUsage()
+	assert.Equal(t, uint64(10), used)
+	assert.Equal(t, 1, active)
+
+	// A second concurrent upload adds to the counters
+	upload2, err := uploadManager.StartUpload(ctx, "testuser", "other.txt", "/target", -1, 1024*1024)
+	require.NoError(t, err)
+	_, err = uploadManager.WriteChunk(upload2, []byte("12345"))
+	require.NoError(t, err)
+
+	used, active = uploadManager.CurrentUsage()
+	assert.Equal(t, uint64(15), used)
+	assert.Equal(t, 2, active)
+
+	// Finishing the first upload releases its bytes
+	_, err = uploadManager.FinishUpload(upload)
+	require.NoError(t, err)
+	used, active = uploadManager.CurrentUsage()
+	assert.Equal(t, uint64(5), used)
+	assert.Equal(t, 1, active)
+
+	// Aborting the second upload releases its bytes
+	require.NoError(t, uploadManager.AbortUpload(upload2))
+	used, active = uploadManager.CurrentUsage()
+	assert.Zero(t, used)
+	assert.Zero(t, active)
+}
+
+// TestManagerCurrentUsage verifies the Manager exposes the running usage
+// counters of its upload manager (PERF-003).
+func TestManagerCurrentUsage(t *testing.T) {
+	t.Parallel()
+
+	mgr, err := NewManager(t.TempDir(), 1024*1024)
+	require.NoError(t, err)
+
+	used, count := mgr.CurrentUsage()
+	assert.Zero(t, used)
+	assert.Zero(t, count)
+
+	upload, err := mgr.GetUploadManager().StartUpload(context.Background(), "testuser", "f.txt", "/target", -1, 1024*1024)
+	require.NoError(t, err)
+	_, err = mgr.GetUploadManager().WriteChunk(upload, []byte("hello"))
+	require.NoError(t, err)
+
+	used, count = mgr.CurrentUsage()
+	assert.Equal(t, uint64(5), used)
+	assert.Equal(t, uint64(1), count)
+}

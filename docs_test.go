@@ -221,3 +221,18 @@ func TestSecurityDocActiveMode(t *testing.T) {
 		t.Error("config.yaml.example does not expose server.allow_active_mode (SEC-005)")
 	}
 }
+
+// TestMakefileLdflagsTargetMainPackage guards QLT-006: the Makefile build
+// ldflags must target the version variables of the main package
+// (cmd/ocis-ftp-bridge), not the non-existent pkg/version package, so
+// `make build` actually stamps the binary version instead of silently
+// producing 1.0.0-dev/unknown.
+func TestMakefileLdflagsTargetMainPackage(t *testing.T) {
+	makefile := string(readRepoFile(t, "Makefile"))
+	if strings.Contains(makefile, "pkg/version") {
+		t.Error("Makefile ldflags still target the non-existent pkg/version package (QLT-006)")
+	}
+	if !strings.Contains(makefile, "-X main.Version=") {
+		t.Error("Makefile ldflags do not set main.Version (QLT-006)")
+	}
+}

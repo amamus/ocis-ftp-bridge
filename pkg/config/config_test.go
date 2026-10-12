@@ -634,3 +634,49 @@ func TestAllowActiveModeConfigKey(t *testing.T) {
 		}
 	})
 }
+
+// TestMaxConcurrentUploadsConfigKey guards PERF-004: the per-account upload
+// concurrency cap accounts[].upload.max_concurrent_uploads must be accepted
+// by the strict configuration loader, must parse into the account config, and
+// must default to 0 (unlimited) when absent.
+func TestMaxConcurrentUploadsConfigKey(t *testing.T) {
+	env := map[string]string{"OCIS_FTP_RECEPTION_TOKEN": "app-token-secret"}
+
+	t.Run("explicitly set", func(t *testing.T) {
+		yamlText := strings.Replace(validYAML(testHash("printer-secret")),
+			"      max_size: 250MiB\n",
+			"      max_size: 250MiB\n      max_concurrent_uploads: 2\n",
+			1)
+		cfg, err := loadText(t, yamlText, env)
+		if err != nil {
+			t.Fatalf("config with accounts[].upload.max_concurrent_uploads failed to load: %v (PERF-004)", err)
+		}
+		if cfg.Accounts[0].Upload.MaxConcurrentUploads != 2 {
+			t.Errorf("MaxConcurrentUploads = %d, want 2 (PERF-004)", cfg.Accounts[0].Upload.MaxConcurrentUploads)
+		}
+	})
+
+	t.Run("absent defaults to unlimited", func(t *testing.T) {
+		cfg, err := loadText(t, validYAML(testHash("printer-secret")), env)
+		if err != nil {
+			t.Fatalf("config without max_concurrent_uploads failed to load: %v", err)
+		}
+		if cfg.Accounts[0].Upload.MaxConcurrentUploads != 0 {
+			t.Errorf("MaxConcurrentUploads default = %d, want 0 (unlimited, PERF-004)", cfg.Accounts[0].Upload.MaxConcurrentUploads)
+		}
+	})
+
+	t.Run("negative rejected", func(t *testing.T) {
+		yamlText := strings.Replace(validYAML(testHash("printer-secret")),
+			"      max_size: 250MiB\n",
+			"      max_size: 250MiB\n      max_concurrent_uploads: -1\n",
+			1)
+		_, err := loadText(t, yamlText, env)
+		if err == nil {
+			t.Fatal("config with max_concurrent_uploads: -1 loaded cleanly, want validation error (PERF-004)")
+		}
+		if !strings.Contains(err.Error(), "max_concurrent_uploads") {
+			t.Errorf("validation error = %v, want it to mention max_concurrent_uploads (PERF-004)", err)
+		}
+	})
+}

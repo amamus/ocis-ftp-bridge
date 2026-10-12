@@ -231,3 +231,21 @@ func TestMonitor_CapacityExceeded(t *testing.T) {
 	// We can't easily test this without creating a full mock, so we'll just
 	// ensure it doesn't panic with nil server
 }
+// TestMonitorCurrentUsagePrefersCounters verifies that a wired usage function
+// (running counters, PERF-003) is used instead of walking the spool directory:
+// the spool directory does not even exist, so a walk would fail.
+func TestMonitorCurrentUsagePrefersCounters(t *testing.T) {
+	monitor := &Monitor{
+		spoolDir: filepath.Join(t.TempDir(), "does-not-exist"),
+		maxSize:  1024,
+		usage:    func() (uint64, uint64) { return 42, 7 },
+	}
+
+	usedBytes, fileCount, err := monitor.currentUsage()
+	if err != nil {
+		t.Fatalf("currentUsage failed: %v", err)
+	}
+	if usedBytes != 42 || fileCount != 7 {
+		t.Errorf("currentUsage = %d bytes, %d files; want 42, 7 (PERF-003)", usedBytes, fileCount)
+	}
+}

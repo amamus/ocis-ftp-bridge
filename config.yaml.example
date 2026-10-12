@@ -171,6 +171,10 @@ accounts:
       
       # Maximum file size for uploads
       max_size: 100MiB
+      
+      # Maximum number of concurrent in-flight uploads for this account
+      # (0 = unlimited). Further uploads are rejected until a slot frees up.
+      max_concurrent_uploads: 4
 
   # Example scanner account
   - username: "scanner1"

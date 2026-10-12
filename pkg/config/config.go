@@ -172,6 +172,9 @@ type TargetConfig struct {
 type UploadConfig struct {
 	CollisionPolicy string   `yaml:"collision_policy" json:"collision_policy"`
 	MaxSize         ByteSize `yaml:"max_size" json:"max_size"`
+	// MaxConcurrentUploads caps the number of concurrent in-flight uploads
+	// for this account (0 = unlimited) (PERF-004).
+	MaxConcurrentUploads int `yaml:"max_concurrent_uploads,omitempty" json:"max_concurrent_uploads,omitempty"`
 }
 
 // LoggerConfig contains configuration for the logger
@@ -490,6 +493,9 @@ func (c *Config) validateWithEnv(lookupEnv func(string) (string, bool)) error {
 		}
 		if account.Upload.MaxSize == 0 {
 			return fmt.Errorf("%s.upload.max_size must be greater than zero", prefix)
+		}
+		if account.Upload.MaxConcurrentUploads < 0 {
+			return fmt.Errorf("%s.upload.max_concurrent_uploads must be >= 0 (0 = unlimited)", prefix)
 		}
 		// max_size must fit in int64: the upload hot path compares it against
 		// int64 byte counters via int64 conversion, which would overflow above

@@ -129,6 +129,10 @@ type Manager interface {
 
 	// GetUploadManager returns the upload manager for streaming uploads.
 	GetUploadManager() UploadManager
+
+	// CurrentUsage returns the bytes written to active uploads and the
+	// number of active uploads (PERF-003).
+	CurrentUsage() (usedBytes uint64, fileCount uint64)
 }
 
 // Upload represents an active upload operation.
@@ -189,6 +193,11 @@ type UploadManager interface {
 
 	// RemoveUpload removes an upload from the active uploads map.
 	RemoveUpload(uploadID string)
+
+	// CurrentUsage returns the bytes written to active uploads and the
+	// number of active uploads (PERF-003: running counters for the spool
+	// monitor instead of a directory walk on every check).
+	CurrentUsage() (usedBytes uint64, activeUploads int)
 }
 
 // defaultManager is the default implementation of Manager.
@@ -545,6 +554,14 @@ func (m *uploadManager) RemoveUpload(uploadID string) {
 	if active {
 		m.releaseUploadBytes(upload)
 	}
+}
+
+// CurrentUsage returns the bytes written to active uploads and the number of
+// active uploads (PERF-003).
+func (m *uploadManager) CurrentUsage() (usedBytes uint64, activeUploads int) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.currentUsage, len(m.activeUploads)
 }
 
 // generateUploadID generates a unique upload ID.
@@ -955,4 +972,12 @@ func (m *defaultManager) GetPendingFiles() ([]FileRef, error) {
 
 func (m *defaultManager) GetUploadManager() UploadManager {
 	return m.uploadManager
+}
+
+// CurrentUsage returns the bytes written to active uploads and the number of
+// active uploads (PERF-003).
+func (m *defaultManager) CurrentUsage() (usedBytes uint64, fileCount uint64) {
+	usedBytes, activeUploads := m.uploadManager.CurrentUsage()
+	// #nosec G115 -- activeUploads is a map length, always non-negative
+	return usedBytes, uint64(activeUploads)
 }
