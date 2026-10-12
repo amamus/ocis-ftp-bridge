@@ -17,6 +17,14 @@ server:
   # Maximum number of concurrent FTP connections
   max_connections: 100
   
+  # Allow active FTP mode (PORT/EPRT). Enabled by default because many
+  # printers require it. The bridge only ever dials the client's own IP
+  # (the data-connection peer IP must match the control-connection peer
+  # IP), but the server does open an outbound connection to a
+  # client-chosen port: restrict egress with a firewall. Set to false to
+  # force passive mode only.
+  allow_active_mode: true
+  
   # Passive FTP mode configuration
   passive:
     # Range of ports for passive FTP data connections

@@ -1409,3 +1409,21 @@ func TestGetSettingsDataConnectionSecurity(t *testing.T) {
 		t.Error("DisableActiveMode = true, want false: active mode defaults to enabled for printer compatibility (SEC-005)")
 	}
 }
+
+// TestGetSettingsActiveModeConfigurable verifies that the
+// server.allow_active_mode config flag drives the FTP server's
+// DisableActiveMode setting (SEC-005).
+func TestGetSettingsActiveModeConfigurable(t *testing.T) {
+	cfg := config.New()
+	cfg.Server.AllowActiveMode = false
+	d := NewBridgeDriver(cfg, noopObs{}, nil)
+	defer d.Shutdown()
+
+	settings, err := d.GetSettings()
+	if err != nil {
+		t.Fatalf("GetSettings failed: %v", err)
+	}
+	if !settings.DisableActiveMode {
+		t.Error("DisableActiveMode = false with allow_active_mode: false, want true (SEC-005)")
+	}
+}

@@ -86,6 +86,10 @@ type ServerConfig struct {
 	Passive       PassiveConfig `yaml:"passive" json:"passive"`
 	TLS           TLSConfig     `yaml:"tls" json:"tls"`
 	MaxConnections int         `yaml:"max_connections,omitempty" json:"max_connections,omitempty"`
+	// AllowActiveMode enables FTP active mode (PORT/EPRT), which many
+	// printers require. Enabled by default; the bridge only ever dials the
+	// control connection peer's own IP (SEC-005).
+	AllowActiveMode bool `yaml:"allow_active_mode,omitempty" json:"allow_active_mode,omitempty"`
 	// Rate limiting configuration
 	RateLimiting RateLimitConfig `yaml:"rate_limiting,omitempty" json:"rate_limiting,omitempty"`
 }
@@ -214,6 +218,7 @@ func New() *Config {
 			Listen:          ":2121",
 			Passive:         PassiveConfig{MinPort: 40000, MaxPort: 50000},
 			MaxConnections:  100,
+			AllowActiveMode: true, // Enabled by default: many printers require active mode (SEC-005)
 			// TLS is enabled by default for security
 			// Plain FTP (unencrypted) is insecure and should be avoided
 			TLS: TLSConfig{
