@@ -69,7 +69,8 @@ func startOperationsServer(t *testing.T, cfg *config.Config) string {
 	}
 	t.Cleanup(func() { ops.Stop() })
 
-	// The listener binds asynchronously; wait for the actual address.
+	// Run binds the listener synchronously; poll briefly anyway so the test
+	// does not depend on that timing detail.
 	addr := ""
 	for i := 0; i < 100; i++ {
 		if addr = ops.Addr(); addr != "" {

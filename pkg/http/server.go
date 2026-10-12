@@ -50,7 +50,15 @@ type OperationsServer struct {
 	webdavURL            string
 	spoolDirectory       string
 	checkTimeout         time.Duration
-	
+
+	// Cached health check results: /readyz serves these for up to
+	// healthCheckCacheTTL instead of running outbound checks per request
+	// (SEC-010).
+	healthMu       sync.Mutex
+	healthCachedAt time.Time
+	healthChecks   map[string]string
+	healthFailed   []string
+
 	// HTTP client for connectivity checks
 	httpClient *http.Client
 
@@ -269,6 +277,24 @@ func (s *OperationsServer) performHealthChecks() (map[string]string, []string) {
 	return checks, failedChecks
 }
 
+// healthCheckCacheTTL is how long /readyz serves cached health check results
+// before running a fresh set of outbound checks (SEC-010).
+const healthCheckCacheTTL = 5 * time.Second
+
+// cachedHealthChecks returns the most recent health check results, running a
+// fresh set of outbound checks at most once per healthCheckCacheTTL. Probe
+// hammering must not amplify into oCIS/WebDAV traffic (SEC-010).
+func (s *OperationsServer) cachedHealthChecks() (map[string]string, []string) {
+	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
+	if time.Since(s.healthCachedAt) < healthCheckCacheTTL {
+		return s.healthChecks, s.healthFailed
+	}
+	checks, failed := s.performHealthChecks()
+	s.healthChecks, s.healthFailed, s.healthCachedAt = checks, failed, time.Now()
+	return checks, failed
+}
+
 // NewOperationsServer creates the operations HTTP server. auth protects the
 // /readyz and /metrics endpoints; /healthz (liveness, consumed by docker/k8s
 // probes) stays unauthenticated by design.
@@ -444,11 +470,11 @@ func NewOperationsServer(address string, auth AuthConfig, healthConfig HealthChe
 			return
 		}
 
-		// Perform actual health checks
-		checks, failedChecks := s.performHealthChecks()
+		// Serve cached health check results, refreshed at most once per
+		// healthCheckCacheTTL (SEC-010).
+		checks, failedChecks := s.cachedHealthChecks()
 		
 		if len(failedChecks) > 0 {
-			atomic.StoreInt32(&s.ready, 0)
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.WriteHeader(http.StatusServiceUnavailable)
 			
@@ -481,8 +507,9 @@ func NewOperationsServer(address string, auth AuthConfig, healthConfig HealthChe
 			return
 		}
 		
-		// All checks passed
-		atomic.StoreInt32(&s.ready, 1)
+		// All checks passed. Readiness is computed per request from the
+		// check results; the handler must not mutate global readiness
+		// state (SEC-010).
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		
@@ -552,25 +579,26 @@ func (s *OperationsServer) Run(ctx context.Context) error {
 	s.started = true
 	s.mu.Unlock()
 
-	// Start the server and capture the actual listening address
+	// Bind the listener eagerly so a busy port fails fast here instead of
+	// leaving the bridge running without an operations server (SEC-009).
+	ln, err := net.Listen("tcp", s.address)
+	if err != nil {
+		s.mu.Lock()
+		s.started = false
+		s.mu.Unlock()
+		return fmt.Errorf("failed to listen on %s: %w", s.address, err)
+	}
+
+	// Store the actual address
+	s.mu.Lock()
+	s.actualAddr = ln.Addr().String()
+	s.mu.Unlock()
+
+	// Serve in the background; the listener is already bound.
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		
-		// Start the server
-		ln, err := net.Listen("tcp", s.address)
-		if err != nil {
-			return
-		}
-		
-		// Store the actual address
-		s.mu.Lock()
-		s.actualAddr = ln.Addr().String()
-		s.mu.Unlock()
-		
-		if err := s.server.Serve(ln); err != nil && err != http.ErrServerClosed {
-			return
-		}
+		_ = s.server.Serve(ln)
 	}()
 
 	// Start health check loop in the background (this will be managed by the server lifecycle)
