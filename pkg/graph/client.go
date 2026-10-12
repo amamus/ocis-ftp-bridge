@@ -15,6 +15,10 @@ import (
 	libregraph "github.com/owncloud/libre-graph-api-go"
 )
 
+// graphOpTimeout bounds a single Graph API call (small JSON requests) now
+// that the HTTP client no longer has a total request Timeout (PERF-001).
+var graphOpTimeout = 30 * time.Second
+
 // libregraphClient is the concrete implementation of Client using the official SDK.
 type libregraphClient struct {
 	apiClient *libregraph.APIClient
@@ -35,9 +39,10 @@ func NewLibreGraphClient(baseURL, username, token string) Client {
 // This allows for custom timeouts, transport configurations, etc.
 func NewLibreGraphClientWithHTTP(baseURL, username, token string, httpClient *http.Client) Client {
 	if httpClient == nil {
-		// Use reasonable defaults for production use
+		// Use reasonable defaults for production use. There is deliberately
+		// no total Timeout: it is replaced by per-call context deadlines (see
+		// callContext) plus the transport-level hang guards (PERF-001).
 		httpClient = &http.Client{
-			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
 				MaxIdleConns:          10,
 				MaxIdleConnsPerHost:   10,
@@ -102,8 +107,10 @@ func (c *libregraphClient) ResolveDrive(id string) (Drive, error) {
 	}
 
 	// Use the drives API to get a specific drive
+	ctx, cancel := c.callContext()
+	defer cancel()
 	drive, resp, err := c.apiClient.DrivesApi.GetDrive(
-		c.withAuth(context.Background()),
+		c.withAuth(ctx),
 		id,
 	).Execute()
 	
@@ -132,8 +139,10 @@ func (c *libregraphClient) ListDrives(userID string) ([]Drive, error) {
 	}
 
 	// Use the me/drives endpoint to get drives for the current user
+	ctx, cancel := c.callContext()
+	defer cancel()
 	resp, httpResp, err := c.apiClient.MeDrivesApi.ListMyDrives(
-		c.withAuth(context.Background()),
+		c.withAuth(ctx),
 	).Execute()
 	
 	if err != nil {
@@ -205,6 +214,12 @@ func (c *libregraphClient) SearchSpaces(userID, name string) ([]Space, error) {
 
 	// Note: Spaces API not implemented yet
 	return []Space{}, nil
+}
+
+// callContext returns the context for a single Graph API call, bounded by
+// graphOpTimeout so a hung oCIS cannot block the caller forever (PERF-001).
+func (c *libregraphClient) callContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), graphOpTimeout)
 }
 
 // withAuth adds authentication to the context for LibreGraph API calls.

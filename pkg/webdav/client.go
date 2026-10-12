@@ -6,6 +6,7 @@ package webdav
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -44,9 +45,12 @@ func NewWebDAVClient(baseURL, username, token string) Client {
 // NewWebDAVClientWithHTTP creates a new WebDAV client with a custom HTTP client.
 func NewWebDAVClientWithHTTP(baseURL, username, token string, httpClient *http.Client) Client {
 	if httpClient == nil {
-		// Use reasonable defaults for production use
+		// Use reasonable defaults for production use. There is deliberately
+		// no total Timeout: it would bound the ENTIRE request including a
+		// 50 MiB upload body and abort large transfers mid-upload (PERF-001).
+		// ResponseHeaderTimeout and IdleConnTimeout remain as hang guards, and
+		// control operations get a per-call deadline (see withControlDeadline).
 		httpClient = &http.Client{
-			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
 				MaxIdleConns:          10,
 				MaxIdleConnsPerHost:   10,
@@ -100,7 +104,33 @@ func (c *webdavClient) Upload(ctx context.Context, path string, data []byte, ove
 	return c.UploadStream(ctx, path, reader, int64(len(data)), overwrite)
 }
 
+const (
+	// uploadMaxAttempts bounds retries of a WebDAV upload on temporary
+	// (5xx) server failures.
+	uploadMaxAttempts = 3
+	// uploadRetryBaseDelay is the backoff before the first retry; it doubles
+	// with each subsequent attempt.
+	uploadRetryBaseDelay = 250 * time.Millisecond
+)
+
+// controlOpTimeout bounds WebDAV control operations (MKCOL, HEAD, DELETE,
+// PROPFIND) when the caller's context carries no deadline. Uploads are
+// deliberately not bounded by it: their duration scales with the file size
+// (PERF-001).
+var controlOpTimeout = 30 * time.Second
+
+// withControlDeadline returns ctx bounded by controlOpTimeout unless the
+// caller already set a deadline.
+func withControlDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, controlOpTimeout)
+}
+
 // UploadStream uploads a file from an io.Reader to the specified path.
+// Temporary (5xx) server failures are retried with bounded backoff; the body
+// must implement io.ReadSeeker so it can be rewound between attempts.
 func (c *webdavClient) UploadStream(ctx context.Context, path string, reader io.Reader, size int64, overwrite bool) error {
 	if path == "" {
 		return ErrInvalidPath
@@ -122,8 +152,43 @@ func (c *webdavClient) UploadStream(ctx context.Context, path string, reader io.
 		return fmt.Errorf("failed to construct WebDAV URL for path %q: %w", path, err)
 	}
 
+	// A retry resends the body, so only rewindable readers can be retried.
+	seeker, rewindable := reader.(io.ReadSeeker)
+
+	var lastErr error
+	for attempt := 1; attempt <= uploadMaxAttempts; attempt++ {
+		if attempt > 1 {
+			if !rewindable {
+				return lastErr
+			}
+			if _, err := seeker.Seek(0, io.SeekStart); err != nil {
+				return fmt.Errorf("failed to rewind upload body for retry: %w", err)
+			}
+			// Bounded exponential backoff between attempts
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("upload aborted while waiting to retry: %w", ctx.Err())
+			case <-time.After(uploadRetryBaseDelay << (attempt - 2)):
+			}
+		}
+
+		lastErr = c.doUpload(ctx, fullURL.String(), reader, size, overwrite, normalizedPath)
+		if lastErr == nil {
+			return nil
+		}
+		// Only temporary server failures are retried; everything else (auth,
+		// conflict, size limits, ...) fails immediately.
+		if !errors.Is(lastErr, ErrTemporaryFailure) {
+			return lastErr
+		}
+	}
+	return fmt.Errorf("upload failed after %d attempts: %w", uploadMaxAttempts, lastErr)
+}
+
+// doUpload performs a single WebDAV PUT for an upload.
+func (c *webdavClient) doUpload(ctx context.Context, fullURL string, reader io.Reader, size int64, overwrite bool, normalizedPath string) error {
 	// Create the request
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, fullURL.String(), reader)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, fullURL, reader)
 	if err != nil {
 		return fmt.Errorf("failed to create WebDAV upload request: %w", err)
 	}
@@ -155,6 +220,9 @@ func (c *webdavClient) UploadStream(ctx context.Context, path string, reader io.
 
 // CreateDirectory creates a directory at the specified path.
 func (c *webdavClient) CreateDirectory(ctx context.Context, path string) error {
+	ctx, cancel := withControlDeadline(ctx)
+	defer cancel()
+
 	if path == "" {
 		return ErrInvalidPath
 	}
@@ -223,6 +291,9 @@ func (c *webdavClient) CreateDirectory(ctx context.Context, path string) error {
 
 // CheckPathExistence checks if a path exists.
 func (c *webdavClient) CheckPathExistence(ctx context.Context, path string) (bool, error) {
+	ctx, cancel := withControlDeadline(ctx)
+	defer cancel()
+
 	if path == "" {
 		return false, ErrInvalidPath
 	}
@@ -280,6 +351,9 @@ func (c *webdavClient) CheckPathExistence(ctx context.Context, path string) (boo
 
 // DeleteFile deletes a file at the specified path.
 func (c *webdavClient) DeleteFile(ctx context.Context, path string) error {
+	ctx, cancel := withControlDeadline(ctx)
+	defer cancel()
+
 	if path == "" {
 		return ErrInvalidPath
 	}
@@ -336,6 +410,9 @@ func (c *webdavClient) DeleteFile(ctx context.Context, path string) error {
 
 // GetFileInfo gets information about a file.
 func (c *webdavClient) GetFileInfo(ctx context.Context, path string) (FileInfo, error) {
+	ctx, cancel := withControlDeadline(ctx)
+	defer cancel()
+
 	if path == "" {
 		return FileInfo{}, ErrInvalidPath
 	}
@@ -518,7 +595,7 @@ func (c *webdavClient) handleUploadResponse(resp *http.Response, path string) er
 	case http.StatusTooManyRequests: // 429
 		return ErrRateLimited
 
-	case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable: // 5xx
+	case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout: // 5xx
 		return ErrTemporaryFailure
 
 	default:
