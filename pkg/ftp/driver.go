@@ -1095,11 +1095,15 @@ func (w *uploadWriter) commitToWebDAV(fileRef spool.FileRef) error {
 		return fmt.Errorf("failed to ensure parent directories: %w", err)
 	}
 
-	// Open the spooled file for reading
-	fileData, err := os.ReadFile(fileRef.Path)
+	// Open the spooled file and stream it to WebDAV. The file must never be
+	// read fully into memory: a 50 MiB upload with up to max_connections
+	// concurrent sessions would otherwise buffer several GiB transiently and
+	// get the container OOM-killed (SEC-003).
+	spooledFile, err := os.Open(fileRef.Path)
 	if err != nil {
-		return fmt.Errorf("failed to read spooled file for WebDAV upload: %w", err)
+		return fmt.Errorf("failed to open spooled file for WebDAV upload: %w", err)
 	}
+	defer spooledFile.Close()
 
 	// Upload to WebDAV
 	// The collision policy was already applied during path resolution. Only the
@@ -1107,8 +1111,7 @@ func (w *uploadWriter) commitToWebDAV(fileRef spool.FileRef) error {
 	// reject the PUT carries If-None-Match so an object that appeared after
 	// resolution fails with a conflict instead of silently overwriting it.
 	overwrite := transfer.CollisionPolicy(w.clientDriver.account.Upload.CollisionPolicy) == transfer.CollisionPolicyOverwrite
-	err = w.clientDriver.webdavClient.Upload(w.clientDriver.context, finalPath, fileData, overwrite)
-	if err != nil {
+	if err := w.clientDriver.webdavClient.UploadStream(w.clientDriver.context, finalPath, spooledFile, fileRef.Size, overwrite); err != nil {
 		return fmt.Errorf("WebDAV upload failed: %w", err)
 	}
 

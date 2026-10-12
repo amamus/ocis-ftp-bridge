@@ -765,8 +765,8 @@ func TestCommitToWebDAVStreamsSpooledFile(t *testing.T) {
 		if string(fake.lastStreamContent) != string(content) {
 			t.Errorf("streamed content = %q, want %q", fake.lastStreamContent, content)
 		}
-		if !fake.lastOverwrite {
-			t.Error("expected overwrite=false for rename policy")
+		if fake.lastOverwrite {
+			t.Error("expected overwrite=false for rename policy, got true")
 		}
 	})
 
