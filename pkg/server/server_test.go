@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"io"
 	"math/big"
 	"net"
@@ -387,5 +388,50 @@ func TestRunStartsSpoolMonitor(t *testing.T) {
 	cancel()
 	if err := <-runErr; err != nil {
 		t.Errorf("Run returned error: %v", err)
+	}
+}
+
+// TestNewNilConfig verifies that server.New rejects a nil configuration
+// instead of panicking (config→server wiring, TST-001).
+func TestNewNilConfig(t *testing.T) {
+	if _, err := New(nil, noopObs{}); err == nil {
+		t.Error("New(nil, ...) = nil error, want ErrInvalidConfig")
+	}
+}
+
+// TestNewInvalidConfig verifies that an invalid configuration fails
+// construction with ErrInvalidConfig (config→server wiring, TST-001).
+func TestNewInvalidConfig(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Server.Listen = "not-an-address"
+
+	_, err := New(cfg, noopObs{})
+	if err == nil {
+		t.Fatal("New with invalid server.listen = nil error, want error")
+	}
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Errorf("New with invalid config = %v, want it to wrap ErrInvalidConfig", err)
+	}
+}
+
+// TestNewSpoolInitFailure verifies that a spool directory that cannot be
+// created fails construction instead of starting a broken service
+// (TST-001).
+func TestNewSpoolInitFailure(t *testing.T) {
+	// A regular file where the spool directory tree should be created.
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0600); err != nil {
+		t.Fatalf("failed to create blocker file: %v", err)
+	}
+
+	cfg := testConfig(t)
+	cfg.Spool.Directory = filepath.Join(blocker, "spool")
+
+	_, err := New(cfg, noopObs{})
+	if err == nil {
+		t.Fatal("New with an uncreatable spool directory = nil error, want error")
+	}
+	if !strings.Contains(err.Error(), "spool") {
+		t.Errorf("New error = %v, want it to mention the spool initialization", err)
 	}
 }
