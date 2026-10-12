@@ -269,15 +269,74 @@ func TestKubernetesManifestPlainKubectlApplicable(t *testing.T) {
 	}
 }
 
-// TestKubernetesManifestHPASingleReplica guards against the multi-replica
-// hazard noted in the audit: the spool PVC is ReadWriteOnce and rate limits
-// are per-instance, so the example HPA must not scale past one replica
-// (see issue #71, QLT-010).
-func TestKubernetesManifestHPASingleReplica(t *testing.T) {
+// TestKubernetesManifestMultiReplicaSafe guards the multi-replica design from
+// issue #71 (QLT-010): the example must be safe to scale horizontally. The
+// spool is a per-replica emptyDir (files are pushed to oCIS within the
+// session, so the spool never needs sharing), the FTP Service pins sessions
+// to a pod with sessionAffinity: ClientIP (FTP sessions are long-lived and
+// cannot be rebalanced), and the HPA may scale past one replica.
+func TestKubernetesManifestMultiReplicaSafe(t *testing.T) {
 	docs, decodeErrs := decodeYAMLDocuments(readRepoFile(t, "kubernetes/deployment.yaml"))
 	for _, err := range decodeErrs {
 		t.Errorf("kubernetes/deployment.yaml: document failed to parse: %v", err)
 	}
+
+	// The spool must be a per-replica emptyDir, not a shared PVC: a
+	// ReadWriteOnce PVC would block multi-replica operation.
+	deploy := findDocument(docs, "Deployment", "ocis-ftp-bridge")
+	if deploy == nil {
+		t.Error("Deployment ocis-ftp-bridge not found or not parseable")
+		return
+	}
+	volumes, _ := podSpec(t, deploy)["volumes"].([]any)
+	var spoolVolume map[string]any
+	for _, v := range volumes {
+		vol, ok := v.(map[string]any)
+		if !ok || vol["name"] != "spool" {
+			continue
+		}
+		spoolVolume = vol
+	}
+	if spoolVolume == nil {
+		t.Fatal("pod spec has no volume named \"spool\"")
+	}
+	if _, isPVC := spoolVolume["persistentVolumeClaim"]; isPVC {
+		t.Error("spool volume is a persistentVolumeClaim; multi-replica operation requires a per-replica emptyDir (issue #71, QLT-010)")
+	}
+	if _, isEmptyDir := spoolVolume["emptyDir"]; !isEmptyDir {
+		t.Error("spool volume is not an emptyDir; multi-replica operation requires a per-replica emptyDir (issue #71, QLT-010)")
+	}
+	if pvc := findDocument(docs, "PersistentVolumeClaim", "ocis-ftp-bridge-spool"); pvc != nil {
+		t.Error("a PersistentVolumeClaim ocis-ftp-bridge-spool still exists; the spool must be a per-replica emptyDir (issue #71, QLT-010)")
+	}
+
+	// The FTP Service must pin sessions to a pod: FTP sessions are
+	// long-lived, so the load balancer must not rebalance them.
+	svc := findDocument(docs, "Service", "ocis-ftp-bridge-ftp")
+	if svc == nil {
+		t.Error("Service ocis-ftp-bridge-ftp not found or not parseable")
+		return
+	}
+	svcSpec, _ := svc["spec"].(map[string]any)
+	if got := svcSpec["sessionAffinity"]; got != "ClientIP" {
+		t.Errorf("Service ocis-ftp-bridge-ftp sessionAffinity = %v, want ClientIP (issue #71, QLT-010)", got)
+	}
+
+	// The passive-port Service must pin the same way: a printer's passive
+	// data connections must land on the same pod as its control connection
+	// (ClientIP affinity hashes the same client IP to the same pod).
+	pasvSvc := findDocument(docs, "Service", "ocis-ftp-bridge-passive")
+	if pasvSvc == nil {
+		t.Error("Service ocis-ftp-bridge-passive not found or not parseable")
+		return
+	}
+	pasvSpec, _ := pasvSvc["spec"].(map[string]any)
+	if got := pasvSpec["sessionAffinity"]; got != "ClientIP" {
+		t.Errorf("Service ocis-ftp-bridge-passive sessionAffinity = %v, want ClientIP (issue #71, QLT-010)", got)
+	}
+
+	// The HPA may scale past one replica now that the spool is per-replica
+	// and sessions are pinned.
 	hpa := findDocument(docs, "HorizontalPodAutoscaler", "ocis-ftp-bridge-hpa")
 	if hpa == nil {
 		t.Error("HorizontalPodAutoscaler ocis-ftp-bridge-hpa not found or not parseable")
@@ -287,8 +346,12 @@ func TestKubernetesManifestHPASingleReplica(t *testing.T) {
 	if !ok {
 		t.Fatal("HPA has no spec")
 	}
-	if got := spec["maxReplicas"]; got != 1 {
-		t.Errorf("HPA maxReplicas = %v, want 1: spool PVC is ReadWriteOnce and the bridge is not multi-replica safe yet (issue #71, QLT-010)", got)
+	maxReplicas, ok := spec["maxReplicas"].(int)
+	if !ok {
+		t.Fatalf("HPA maxReplicas is not an integer: %v", spec["maxReplicas"])
+	}
+	if maxReplicas <= 1 {
+		t.Errorf("HPA maxReplicas = %d, want > 1: the spool is a per-replica emptyDir and sessions are pinned by sessionAffinity, so the bridge is multi-replica safe (issue #71, QLT-010)", maxReplicas)
 	}
 }
 
