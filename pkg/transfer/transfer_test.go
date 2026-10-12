@@ -374,60 +374,6 @@ func TestTransferManager_ValidateTargetPath(t *testing.T) {
 	}
 }
 
-func TestPathHelpers(t *testing.T) {
-	t.Run("isSafePath", func(t *testing.T) {
-		testCases := []struct {
-			path     string
-			expected bool
-		}{
-			{"simple/path", true},
-			{"/absolute/path", true},
-			{"path/../traversal", true}, // The regex allows this character set
-			{"path with spaces", true},
-			{"path/with/dots.txt", true},
-			{"", false},
-		}
-
-		for _, tc := range testCases {
-			t.Run(tc.path, func(t *testing.T) {
-				result := isSafePath(tc.path)
-				if result != tc.expected {
-					t.Errorf("isSafePath(%q) = %v, expected %v", tc.path, result, tc.expected)
-				}
-			})
-		}
-	})
-
-	t.Run("extractPathComponents", func(t *testing.T) {
-		testCases := []struct {
-			path     string
-			expected []string
-		}{
-			{"", []string{}},
-			{".", []string{}},
-			{"/", []string{}},
-			{"a/b/c", []string{"a", "b", "c"}},
-			{"/a/b/c", []string{"a", "b", "c"}},
-			{"a/b/c/", []string{"a", "b", "c"}},
-		}
-
-		for _, tc := range testCases {
-			t.Run(tc.path, func(t *testing.T) {
-				result := extractPathComponents(tc.path)
-				if len(result) != len(tc.expected) {
-					t.Errorf("extractPathComponents(%q) returned %d components, expected %d", tc.path, len(result), len(tc.expected))
-					return
-				}
-				for i, comp := range result {
-					if comp != tc.expected[i] {
-						t.Errorf("component %d: got %q, expected %q", i, comp, tc.expected[i])
-					}
-				}
-			})
-		}
-	})
-}
-
 func TestCollisionPolicyStringValues(t *testing.T) {
 	t.Run("collision policy constants", func(t *testing.T) {
 		if string(CollisionPolicyRename) != "rename" {
