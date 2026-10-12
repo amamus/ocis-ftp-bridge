@@ -491,6 +491,21 @@ func TestNewWebDAVClientFromGraph(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestNewWebDAVClientFromGraph_EmptyWebDAVURL(t *testing.T) {
+	t.Parallel()
+
+	// SEC-006: when the Graph API response omits the WebDAV URL, the client
+	// must not fall back to a hard-coded host. The client attaches the app
+	// token via Basic auth on every request, so a fallback URL would leak
+	// the token to an unintended server.
+	drive := graph.Drive{ID: "drive1", Name: "Test Drive", WebDAVURL: ""}
+	client := NewWebDAVClientFromGraph(drive, "testuser", "testtoken")
+	wc, ok := client.(*webdavClient)
+	require.True(t, ok)
+	assert.NotEqual(t, "https://ocis.example.com/webdav", wc.baseURL,
+		"client must not use the hard-coded fallback WebDAV URL (SEC-006)")
+}
+
 func TestWebDAVClient_EmptyData(t *testing.T) {
 	t.Parallel()
 
