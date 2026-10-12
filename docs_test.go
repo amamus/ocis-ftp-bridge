@@ -147,10 +147,26 @@ func TestSecurityDocOpsPort(t *testing.T) {
 // docs/security.md actually exists on /metrics (QLT-004).
 func TestSecurityDocMetricNames(t *testing.T) {
 	doc := string(readRepoFile(t, "docs/security.md"))
-	re := regexp.MustCompile(`ocis_ftp_[a-z_]+`)
+	re := regexp.MustCompile(`ocis_ftp_[a-z_]+\*?`)
 	seen := map[string]bool{}
 	for _, name := range re.FindAllString(doc, -1) {
 		seen[name] = true
+		if strings.HasSuffix(name, "*") {
+			// Glob family reference (e.g. ocis_ftp_spool_*): valid when at
+			// least one known metric carries the prefix.
+			prefix := strings.TrimSuffix(name, "*")
+			found := false
+			for known := range knownMetricNames {
+				if strings.HasPrefix(known, prefix) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("docs/security.md references unknown metric family %q", name)
+			}
+			continue
+		}
 		if !knownMetricNames[name] {
 			t.Errorf("docs/security.md references unknown metric %q", name)
 		}
