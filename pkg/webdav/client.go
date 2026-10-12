@@ -220,6 +220,9 @@ func (c *webdavClient) doUpload(ctx context.Context, fullURL string, reader io.R
 
 // CreateDirectory creates a directory at the specified path.
 func (c *webdavClient) CreateDirectory(ctx context.Context, path string) error {
+	ctx, cancel := withControlDeadline(ctx)
+	defer cancel()
+
 	if path == "" {
 		return ErrInvalidPath
 	}
@@ -288,6 +291,9 @@ func (c *webdavClient) CreateDirectory(ctx context.Context, path string) error {
 
 // CheckPathExistence checks if a path exists.
 func (c *webdavClient) CheckPathExistence(ctx context.Context, path string) (bool, error) {
+	ctx, cancel := withControlDeadline(ctx)
+	defer cancel()
+
 	if path == "" {
 		return false, ErrInvalidPath
 	}
@@ -345,6 +351,9 @@ func (c *webdavClient) CheckPathExistence(ctx context.Context, path string) (boo
 
 // DeleteFile deletes a file at the specified path.
 func (c *webdavClient) DeleteFile(ctx context.Context, path string) error {
+	ctx, cancel := withControlDeadline(ctx)
+	defer cancel()
+
 	if path == "" {
 		return ErrInvalidPath
 	}
@@ -401,6 +410,9 @@ func (c *webdavClient) DeleteFile(ctx context.Context, path string) error {
 
 // GetFileInfo gets information about a file.
 func (c *webdavClient) GetFileInfo(ctx context.Context, path string) (FileInfo, error) {
+	ctx, cancel := withControlDeadline(ctx)
+	defer cancel()
+
 	if path == "" {
 		return FileInfo{}, ErrInvalidPath
 	}

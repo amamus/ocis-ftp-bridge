@@ -107,8 +107,10 @@ func (c *libregraphClient) ResolveDrive(id string) (Drive, error) {
 	}
 
 	// Use the drives API to get a specific drive
+	ctx, cancel := c.callContext()
+	defer cancel()
 	drive, resp, err := c.apiClient.DrivesApi.GetDrive(
-		c.withAuth(context.Background()),
+		c.withAuth(ctx),
 		id,
 	).Execute()
 	
@@ -137,8 +139,10 @@ func (c *libregraphClient) ListDrives(userID string) ([]Drive, error) {
 	}
 
 	// Use the me/drives endpoint to get drives for the current user
+	ctx, cancel := c.callContext()
+	defer cancel()
 	resp, httpResp, err := c.apiClient.MeDrivesApi.ListMyDrives(
-		c.withAuth(context.Background()),
+		c.withAuth(ctx),
 	).Execute()
 	
 	if err != nil {
@@ -210,6 +214,12 @@ func (c *libregraphClient) SearchSpaces(userID, name string) ([]Space, error) {
 
 	// Note: Spaces API not implemented yet
 	return []Space{}, nil
+}
+
+// callContext returns the context for a single Graph API call, bounded by
+// graphOpTimeout so a hung oCIS cannot block the caller forever (PERF-001).
+func (c *libregraphClient) callContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), graphOpTimeout)
 }
 
 // withAuth adds authentication to the context for LibreGraph API calls.
