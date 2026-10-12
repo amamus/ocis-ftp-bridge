@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -346,36 +347,76 @@ func TestHandleUploadOpenPathMapping(t *testing.T) {
 // mockWebDAVServer is an httptest server implementing just enough WebDAV for
 // driver tests: HEAD with real 404 semantics, MKCOL, and PUT that honors
 // If-None-Match (412 when the object exists and the header is "*").
+// In strict mode it follows RFC 4918 like real oCIS: MKCOL and PUT fail with
+// 409 Conflict when intermediate collections are missing.
 type mockWebDAVServer struct {
 	*httptest.Server
 	mu         sync.Mutex
 	files      map[string][]byte
+	dirs       map[string]bool
+	strict     bool
 	putHeaders []http.Header
 	mkcolPaths []string
 }
 
 func newMockWebDAVServer(t *testing.T, existing map[string][]byte) *mockWebDAVServer {
 	t.Helper()
-	m := &mockWebDAVServer{files: make(map[string][]byte)}
-	for p, data := range existing {
+	return newMockWebDAVServerMode(t, existing, nil, false)
+}
+
+// newStrictMockWebDAVServer creates a mock with RFC 4918 semantics: PUT and
+// MKCOL return 409 Conflict when the parent collection does not exist.
+func newStrictMockWebDAVServer(t *testing.T, existingFiles map[string][]byte, existingDirs map[string]bool) *mockWebDAVServer {
+	t.Helper()
+	return newMockWebDAVServerMode(t, existingFiles, existingDirs, true)
+}
+
+func newMockWebDAVServerMode(t *testing.T, existingFiles map[string][]byte, existingDirs map[string]bool, strict bool) *mockWebDAVServer {
+	t.Helper()
+	m := &mockWebDAVServer{
+		files:  make(map[string][]byte),
+		dirs:   make(map[string]bool),
+		strict: strict,
+	}
+	for p, data := range existingFiles {
 		m.files[p] = data
 	}
+	for p := range existingDirs {
+		m.dirs[p] = true
+	}
 	m.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/webdav")
+		// The WebDAV client appends a trailing slash to MKCOL paths; normalize
+		// so directory lookups are consistent.
+		path := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/webdav"), "/")
+		parent := pathpkg.Dir(path)
 		m.mu.Lock()
 		defer m.mu.Unlock()
+		parentMissing := m.strict && parent != "/" && parent != "." && !m.dirs[parent]
 		switch r.Method {
 		case http.MethodHead:
 			if _, ok := m.files[path]; ok {
 				w.WriteHeader(http.StatusOK)
-			} else {
-				w.WriteHeader(http.StatusNotFound)
+				return
 			}
+			if m.dirs[path] {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
 		case "MKCOL":
 			m.mkcolPaths = append(m.mkcolPaths, path)
+			if parentMissing {
+				w.WriteHeader(http.StatusConflict)
+				return
+			}
+			m.dirs[path] = true
 			w.WriteHeader(http.StatusCreated)
 		case http.MethodPut:
 			m.putHeaders = append(m.putHeaders, r.Header.Clone())
+			if parentMissing {
+				w.WriteHeader(http.StatusConflict)
+				return
+			}
 			if r.Header.Get("If-None-Match") == "*" {
 				if _, ok := m.files[path]; ok {
 					w.WriteHeader(http.StatusPreconditionFailed)
@@ -423,6 +464,12 @@ func (m *mockWebDAVServer) putCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.putHeaders)
+}
+
+func (m *mockWebDAVServer) mkcolPathsSnapshot() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.mkcolPaths...)
 }
 
 // newCollisionTestDriver builds a BridgeDriver whose accounts resolve against
@@ -675,5 +722,52 @@ func TestUploadWriterCloseAbortsAfterWriteError(t *testing.T) {
 	}
 	if !mock.fileExists("/ok.bin") {
 		t.Error("expected /ok.bin to be committed to WebDAV")
+	}
+}
+
+// TestHandleUploadOpenNestedPathCreatesParents verifies the QLT-002 fix
+// end to end: a STOR to a nested path must issue MKCOL for every missing
+// parent level before the PUT, because oCIS (RFC 4918) answers a PUT with a
+// missing parent collection with 409 Conflict instead of auto-creating it.
+// The strict mock enforces those semantics, unlike the CI e2e mock whose PUT
+// handler silently creates parent directories.
+func TestHandleUploadOpenNestedPathCreatesParents(t *testing.T) {
+	mock := newStrictMockWebDAVServer(t, nil, nil)
+
+	spoolDir := t.TempDir()
+	spoolManager, err := spool.NewManager(spoolDir, 1024*1024)
+	if err != nil {
+		t.Fatalf("failed to create spool manager: %v", err)
+	}
+
+	_, client := newCollisionTestDriver(t, mock, spoolManager, "overwrite", "/")
+
+	w, err := client.handleUploadOpen("/scans/2026/oct/file.pdf")
+	if err != nil {
+		t.Fatalf("handleUploadOpen failed: %v", err)
+	}
+	if _, err := w.Write([]byte("scan data")); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close failed for nested-path upload (parents must be created via MKCOL before PUT): %v", err)
+	}
+
+	wantMKCOL := []string{"/scans", "/scans/2026", "/scans/2026/oct"}
+	gotMKCOL := mock.mkcolPathsSnapshot()
+	if len(gotMKCOL) != len(wantMKCOL) {
+		t.Fatalf("expected MKCOL for %v, got %v", wantMKCOL, gotMKCOL)
+	}
+	for i := range wantMKCOL {
+		if gotMKCOL[i] != wantMKCOL[i] {
+			t.Fatalf("expected MKCOL order %v, got %v", wantMKCOL, gotMKCOL)
+		}
+	}
+
+	if !mock.fileExists("/scans/2026/oct/file.pdf") {
+		t.Error("expected /scans/2026/oct/file.pdf to be committed to WebDAV")
+	}
+	if got := mock.putCount(); got != 1 {
+		t.Errorf("expected exactly one PUT, got %d", got)
 	}
 }
