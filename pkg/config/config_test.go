@@ -634,3 +634,17 @@ func TestAllowActiveModeConfigKey(t *testing.T) {
 		}
 	})
 }
+
+// TestMaxConcurrentUploadsConfigKey guards PERF-004: the per-account upload
+// concurrency cap accounts[].upload.max_concurrent_uploads must be accepted
+// by the strict configuration loader.
+func TestMaxConcurrentUploadsConfigKey(t *testing.T) {
+	env := map[string]string{"OCIS_FTP_RECEPTION_TOKEN": "app-token-secret"}
+	yamlText := strings.Replace(validYAML(testHash("printer-secret")),
+		"      max_size: 250MiB\n",
+		"      max_size: 250MiB\n      max_concurrent_uploads: 2\n",
+		1)
+	if _, err := loadText(t, yamlText, env); err != nil {
+		t.Fatalf("config with accounts[].upload.max_concurrent_uploads failed to load: %v (PERF-004)", err)
+	}
+}

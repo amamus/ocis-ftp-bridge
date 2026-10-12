@@ -38,13 +38,47 @@ func TestLibreGraphClient_ResolveDrive_EmptyID(t *testing.T) {
 	assert.Equal(t, ErrInvalidDriveID, err)
 }
 
+// TestLibreGraphClient_ListDrives_EmptyUserID verifies that an empty userID
+// lists the authenticated user's drives via /me/drives instead of being
+// rejected (QLT-005): the bridge always authenticates with the account's own
+// token, so the empty-userID form is the current-user form. Against an
+// unreachable server the call must fail with a connection error, not
+// ErrInvalidUserID.
 func TestLibreGraphClient_ListDrives_EmptyUserID(t *testing.T) {
 	t.Parallel()
 
 	client := NewLibreGraphClient("http://localhost:9200/api/libregraph", "user", "token")
 	_, err := client.ListDrives("")
 	require.Error(t, err)
-	assert.Equal(t, ErrInvalidUserID, err)
+	assert.NotEqual(t, ErrInvalidUserID, err)
+}
+
+// TestLibreGraphClient_ValidateConfiguration guards QLT-005: validating the
+// client configuration must succeed against a reachable LibreGraph API. It
+// always failed before because it called ListDrives(""), which rejected the
+// empty userID.
+func TestLibreGraphClient_ValidateConfiguration(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/me/drives") && r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"value": []}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client := NewLibreGraphClient(server.URL+"/api/libregraph", "testuser", "testtoken")
+	lc, ok := client.(*libregraphClient)
+	require.True(t, ok, "expected *libregraphClient, got %T", client)
+	require.NoError(t, lc.ValidateConfiguration())
+
+	// The empty-userID form must hit /me/drives as well
+	drives, err := client.ListDrives("")
+	require.NoError(t, err)
+	assert.Empty(t, drives)
 }
 
 func TestLibreGraphClient_SearchDrives_InvalidParameters(t *testing.T) {
