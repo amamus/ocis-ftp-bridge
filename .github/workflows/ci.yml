@@ -149,6 +149,11 @@ jobs:
 
         http:
           address: "0.0.0.0:${{ env.HTTP_PORT }}"
+          auth:
+            enabled: true
+            method: basic
+            username: admin
+            password: "e2e-test-password"
 
         spool:
           directory: /tmp/ocis-ftp-bridge-spool
@@ -376,7 +381,8 @@ jobs:
         # Test 3: Health and readiness endpoints
         echo "=== Test 3: Health and readiness endpoints ==="
         health_response=$(wget -q -O- http://localhost:${{ env.HTTP_PORT }}/healthz)
-        ready_response=$(wget -q -O- http://localhost:${{ env.HTTP_PORT }}/readyz)
+        ready_response=$(curl -sS -u admin:e2e-test-password http://localhost:${{ env.HTTP_PORT }}/readyz)
+        unauth_code=$(curl -sS -o /dev/null -w "%{http_code}" http://localhost:${{ env.HTTP_PORT }}/readyz)
         
         if echo "$health_response" | grep -q '"status":"live"' && echo "$ready_response" | grep -q '"status":"ready"'; then
           echo "PASS: Test 3 - Health and readiness endpoints responding"
@@ -385,9 +391,16 @@ jobs:
           exit 1
         fi
         
+        if [ "$unauth_code" = "401" ]; then
+          echo "PASS: Test 3 - /readyz rejects unauthenticated requests"
+        else
+          echo "FAIL: Test 3 - /readyz without credentials = $unauth_code, want 401"
+          exit 1
+        fi
+        
         # Test 4: Metrics endpoint
         echo "=== Test 4: Metrics endpoint ==="
-        metrics_response=$(wget -q -O- http://localhost:${{ env.HTTP_PORT }}/metrics)
+        metrics_response=$(curl -sS -u admin:e2e-test-password http://localhost:${{ env.HTTP_PORT }}/metrics)
         if echo "$metrics_response" | grep -q "ocis_ftp"; then
           echo "PASS: Test 4 - Metrics endpoint returning ocis_ftp metrics"
         else
