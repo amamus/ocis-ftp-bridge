@@ -1107,3 +1107,209 @@ func TestResolveDriveForAccountDoesNotCacheErrors(t *testing.T) {
 		t.Errorf("Graph API called %d times, want 2 (error not cached, PERF-002)", got)
 	}
 }
+
+// TestConnectionTrackerDeletesZeroCountEntries verifies that releasing the
+// last connection for an IP removes its tracking entry instead of leaving a
+// permanent zero-count entry per distinct source IP (SEC-012, CWE-401).
+func TestConnectionTrackerDeletesZeroCountEntries(t *testing.T) {
+	ct := newConnectionTracker(10, 100)
+	ip := "192.0.2.1"
+
+	ct.AllowConnection(ip)
+	ct.AllowConnection(ip)
+	ct.ReleaseConnection(ip)
+	ct.ReleaseConnection(ip)
+
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+	if _, exists := ct.ipConnections[ip]; exists {
+		t.Errorf("ipConnections still holds an entry for %s after all connections were released (SEC-012)", ip)
+	}
+}
+
+// TestAuthAttemptTrackerDeletesEntryOnSuccess verifies that a successful
+// authentication removes the IP's tracking entry instead of leaving a
+// permanent entry per source IP that ever authenticated (SEC-012, CWE-401).
+func TestAuthAttemptTrackerDeletesEntryOnSuccess(t *testing.T) {
+	at := newAuthAttemptTracker(5, time.Minute, time.Minute)
+	ip := "192.0.2.2"
+
+	at.RecordAuthAttempt(ip, false)
+	at.mu.Lock()
+	_, exists := at.ipAttempts[ip]
+	at.mu.Unlock()
+	if !exists {
+		t.Fatal("expected a tracking entry after a failed attempt")
+	}
+
+	at.RecordAuthAttempt(ip, true)
+	at.mu.Lock()
+	_, exists = at.ipAttempts[ip]
+	at.mu.Unlock()
+	if exists {
+		t.Errorf("ipAttempts still holds an entry for %s after a successful auth (SEC-012)", ip)
+	}
+}
+
+// TestShutdownCancelsSessionContext verifies that shutting the driver down
+// cancels in-flight session contexts (which must derive from the driver
+// lifecycle) instead of leaving uploads running until the client
+// disconnects (QLT-011).
+func TestShutdownCancelsSessionContext(t *testing.T) {
+	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"test-drive-id","name":"Test Drive","driveType":"personal","webUrl":"http://localhost/webdav"}`))
+	}))
+	defer graphSrv.Close()
+
+	cfg := config.New()
+	cfg.OCIS.GraphURL = graphSrv.URL
+	cfg.Accounts = []config.AccountConfig{
+		{
+			Username:     "test-printer",
+			PasswordHash: testPasswordHash(t, "test-password"),
+			OCIS: config.AccountOCISConfig{
+				Username:    "test-printer",
+				AppTokenEnv: "TEST_PRINTER_APP_TOKEN",
+			},
+			Target: config.TargetConfig{
+				DriveID: "test-drive-id",
+				Root:    "/",
+			},
+			Upload: config.UploadConfig{
+				CollisionPolicy: "rename",
+				MaxSize:         1024 * 1024,
+			},
+			AppToken: "test-token",
+		},
+	}
+
+	d := NewBridgeDriver(cfg, noopObs{}, nil)
+	defer d.Shutdown()
+
+	cc := &mockClientContext{
+		id:   43,
+		addr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12346},
+	}
+
+	driver, err := d.AuthUser(cc, "test-printer", "test-password")
+	if err != nil {
+		t.Fatalf("AuthUser failed: %v", err)
+	}
+	clientDriver := driver.(*bridgeClientDriver)
+
+	// The session context must be alive while the server is running
+	select {
+	case <-clientDriver.context.Done():
+		t.Fatal("session context cancelled before shutdown")
+	default:
+	}
+
+	// Shutting the driver down must cancel in-flight session contexts
+	d.Shutdown()
+
+	select {
+	case <-clientDriver.context.Done():
+		// expected
+	case <-time.After(2 * time.Second):
+		t.Fatal("session context was not cancelled on driver shutdown (QLT-011)")
+	}
+}
+
+// TestShutdownIsIdempotentAndRaceFree hammers Shutdown and IsShuttingDown
+// from multiple goroutines. Under -race this fails on the unsynchronized
+// shutdown flag (QLT-008) and can panic on a double channel close; both are
+// fixed by making the channel close the single synchronization point.
+func TestShutdownIsIdempotentAndRaceFree(t *testing.T) {
+	d := NewBridgeDriver(config.New(), noopObs{}, nil)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				d.Shutdown()
+				d.IsShuttingDown()
+			}
+		}()
+	}
+	wg.Wait()
+
+	if !d.IsShuttingDown() {
+		t.Error("IsShuttingDown = false after Shutdown")
+	}
+}
+
+// TestAuthenticateUnknownUserReturnsNotFound pins the authentication
+// contract for unknown users (SEC-011): the outcome must remain
+// indistinguishable from a wrong password. The timing equalization itself
+// is pinned by TestDummyPasswordHashIsValid.
+func TestAuthenticateUnknownUserReturnsNotFound(t *testing.T) {
+	d := NewBridgeDriver(config.New(), noopObs{}, nil)
+	defer d.Shutdown()
+
+	if _, err := d.authenticateUser("no-such-user", "whatever"); err != ErrUserNotFound {
+		t.Errorf("authenticateUser(unknown user) = %v, want ErrUserNotFound", err)
+	}
+}
+
+// TestUploadFileStatReportsBytesWritten verifies that Stat on an in-flight
+// upload file reports the bytes written so far: uploadFile.pos must track
+// writes (QLT-008 — previously pos was never updated and Stat always
+// reported 0).
+func TestUploadFileStatReportsBytesWritten(t *testing.T) {
+	spoolDir := t.TempDir()
+	spoolManager, err := spool.NewManager(spoolDir, 1024*1024)
+	if err != nil {
+		t.Fatalf("failed to create spool manager: %v", err)
+	}
+
+	mock := newMockWebDAVServer(t, nil)
+
+	cfg := config.New()
+	cfg.OCIS.WebDAVURL = mock.URL + "/webdav"
+	cfg.Accounts = []config.AccountConfig{
+		{
+			Username: "test-printer",
+			Target:   config.TargetConfig{DriveID: "test-drive-id", Root: "/"},
+			Upload:   config.UploadConfig{CollisionPolicy: "rename", MaxSize: 1024 * 1024},
+		},
+	}
+	d := NewBridgeDriver(cfg, noopObs{}, spoolManager)
+	defer d.Shutdown()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	client := &bridgeClientDriver{
+		bridgeDriver: d,
+		account:      &cfg.Accounts[0],
+		user:         "test-printer",
+		currentDir:   "/",
+		spoolUploads: make(map[string]*spoolUpload),
+		context:      ctx,
+		cancel:       cancel,
+	}
+
+	f, err := client.OpenFile("/stat-test.txt", os.O_WRONLY|os.O_CREATE, 0644)
+	if err != nil {
+		t.Fatalf("OpenFile failed: %v", err)
+	}
+	defer func() {
+		_ = spoolManager.GetUploadManager().AbortUpload(f.(*uploadFile).writer.upload)
+	}()
+
+	payload := []byte("hello spool")
+	if n, err := f.Write(payload); err != nil || n != len(payload) {
+		t.Fatalf("Write = %d, %v; want %d, nil", n, err, len(payload))
+	}
+
+	info, err := f.Stat()
+	if err != nil {
+		t.Fatalf("Stat failed: %v", err)
+	}
+	if info.Size() != int64(len(payload)) {
+		t.Errorf("Stat size = %d, want %d (uploadFile.pos must track writes, QLT-008)", info.Size(), len(payload))
+	}
+}
