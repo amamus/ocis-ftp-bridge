@@ -6,6 +6,13 @@
 # Usage:
 #   kubectl apply -f kubernetes/
 #
+# Prerequisites:
+#   The example enables explicit FTPS (AUTH TLS). Create the TLS Secret
+#   before applying:
+#     kubectl create namespace ocis-ftp-bridge
+#     kubectl create secret tls ocis-ftp-bridge-tls \
+#       --cert=ftp.crt --key=ftp.key -n ocis-ftp-bridge
+#
 # Note: This example uses placeholder values. Replace with your actual
 # configuration and adjust resource requirements as needed.
 
@@ -46,13 +53,15 @@ data:
         min_port: 40000
         max_port: 50000
         # public_ip: "10.0.0.100"  # Set to the external IP if behind NAT
+      # Explicit FTPS (AUTH TLS). The certificate and key come from the
+      # ocis-ftp-bridge-tls Secret (see the volumes section below).
       tls:
-        enabled: false
-        # cert: "/etc/ssl/certs/tls.crt"
-        # key: "/etc/ssl/private/tls.key"
-    
+        enabled: true
+        cert: "/etc/ssl/ftp-bridge/tls.crt"
+        key: "/etc/ssl/ftp-bridge/tls.key"
+
     http:
-      address: ":9200"
+      address: ":9090"
       # Bridge-level auth is disabled: kubelet httpGet probes cannot send
       # credentials, and this Service is ClusterIP (cluster-internal only).
       # Restrict access with a NetworkPolicy; front /metrics with an
@@ -116,24 +125,25 @@ metadata:
     component: ftp-bridge
 
 spec:
-  replicas: 1  # Single replica for simplicity; scale if needed
-  
+  # Single replica: the spool PVC is ReadWriteOnce and rate limits are
+  # per-instance, so the bridge is not multi-replica safe yet (issue #71).
+  replicas: 1
+
   selector:
     matchLabels:
       app: ocis-ftp-bridge
       component: ftp-bridge
-  
+
   template:
     metadata:
       labels:
         app: ocis-ftp-bridge
         component: ftp-bridge
         version: "1.0.0"
-      
-      annotations:
-        # Reload when config changes
-        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
-    
+      # This is a plain kubectl manifest (no Helm template syntax). After
+      # changing the ConfigMap, roll the pods manually:
+      #   kubectl rollout restart deployment/ocis-ftp-bridge -n ocis-ftp-bridge
+
     spec:
       # Run as non-root for security
       securityContext:
@@ -162,7 +172,7 @@ spec:
           containerPort: 50000
           protocol: TCP
         - name: http
-          containerPort: 9200
+          containerPort: 9090
           protocol: TCP
         
         # Resource requests and limits
@@ -210,6 +220,9 @@ spec:
         - name: config
           mountPath: /app/config
           readOnly: true
+        - name: tls-certs
+          mountPath: /etc/ssl/ftp-bridge
+          readOnly: true
         - name: spool
           mountPath: /var/spool/ocis-ftp-bridge
         - name: tmp
@@ -231,6 +244,11 @@ spec:
       - name: config
         configMap:
           name: ocis-ftp-bridge-config
+      # TLS certificate for explicit FTPS; create before applying (see the
+      # header of this file).
+      - name: tls-certs
+        secret:
+          secretName: ocis-ftp-bridge-tls
       - name: spool
         persistentVolumeClaim:
           claimName: ocis-ftp-bridge-spool
@@ -280,8 +298,8 @@ spec:
   
   ports:
   - name: http
-    port: 9200
-    targetPort: 9200
+    port: 9090
+    targetPort: 9090
     protocol: TCP
 
 ---
@@ -333,7 +351,9 @@ spec:
     name: ocis-ftp-bridge
   
   minReplicas: 1
-  maxReplicas: 3
+  # The spool PVC is ReadWriteOnce and rate limits are per-instance, so the
+  # bridge does not scale horizontally yet (issue #71, QLT-010).
+  maxReplicas: 1
   
   metrics:
   - type: Resource

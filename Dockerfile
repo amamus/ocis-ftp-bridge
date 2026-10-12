@@ -88,7 +88,7 @@ EXPOSE 2121/tcp
 # FTP passive port range (example)
 EXPOSE 40000-50000/tcp
 # HTTP operations/health port
-EXPOSE 9200/tcp
+EXPOSE 9090/tcp
 
 # Set entrypoint
 ENTRYPOINT ["/app/bin/ocis-ftp-bridge"]
@@ -98,7 +98,7 @@ CMD ["-config", "/app/config/config.yaml"]
 
 # Health check - check that the HTTP health endpoint responds
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-	CMD wget --quiet --tries=1 --spider http://localhost:9200/healthz || exit 1
+	CMD wget --quiet --tries=1 --spider http://localhost:9090/healthz || exit 1
 
 # Volumes for persistent data
 VOLUME ["/app/spool", "/app/config", "/app/logs"]
