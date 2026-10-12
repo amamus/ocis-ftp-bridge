@@ -48,6 +48,10 @@ server:
   # Rate Limiting Configuration
   # ==========================================================================
   # Rate limiting protects against brute-force attacks and resource exhaustion
+  #
+  # Limits are enforced per bridge instance: when running multiple replicas
+  # (see docs/adr/0001-multi-replica-scaling.md), the effective limit is the
+  # configured value times the replica count. Size the values accordingly.
   rate_limiting:
     # Maximum connections per IP address (0 = unlimited)
     max_connections_per_ip: 10
