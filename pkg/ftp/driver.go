@@ -235,7 +235,9 @@ type BridgeDriver struct {
 	obs          observability.Client
 	spoolManager spool.Manager
 	graphClient  graph.Client
-	transferManager *transfer.TransferManager
+	// transferManagers holds one transfer manager per account, each with a
+	// WebDAV client built from that account's oCIS credentials.
+	transferManagers map[string]*transfer.TransferManager
 
 	// Client management
 	activeConnections int64
@@ -281,12 +283,19 @@ func NewBridgeDriver(
 		accounts[cfg.Accounts[i].Username] = &cfg.Accounts[i]
 	}
 
-	// Create transfer manager for path mapping and collision handling
-	transferMgr := transfer.NewTransferManager()
-	
-	// Add target configurations for each account
+	// Create one transfer manager per account for path mapping and collision
+	// handling. Each manager gets a WebDAV client built from that account's
+	// oCIS credentials so collision checks and directory creation run against
+	// the same oCIS endpoint the uploads target.
+	transferMgrs := make(map[string]*transfer.TransferManager, len(cfg.Accounts))
 	for i := range cfg.Accounts {
 		account := &cfg.Accounts[i]
+		webdavClient := webdav.NewClientWithCredentials(
+			cfg.OCIS.WebDAVURL,
+			account.OCIS.Username,
+			account.AppToken,
+		)
+		transferMgr := transfer.NewTransferManagerWithWebDAV(context.Background(), webdavClient)
 		transferMgr.AddTarget(account.Username, transfer.TargetConfig{
 			DriveID:          account.Target.DriveID,
 			Drive:           account.Target.Drive,
@@ -294,6 +303,7 @@ func NewBridgeDriver(
 			CollisionPolicy: transfer.CollisionPolicy(account.Upload.CollisionPolicy),
 			MaxSize:         uint64(account.Upload.MaxSize),
 		})
+		transferMgrs[account.Username] = transferMgr
 	}
 
 	// Initialize rate limiting trackers
@@ -317,7 +327,7 @@ func NewBridgeDriver(
 		obs:          obs,
 		spoolManager:  spoolManager,
 		graphClient:   graphClient,
-		transferManager: transferMgr,
+		transferManagers:   transferMgrs,
 		accounts:      accounts,
 		clients:       make(map[uint32]*bridgeClientDriver),
 		maxConnections: cfg.Server.MaxConnections,
@@ -325,6 +335,12 @@ func NewBridgeDriver(
 		authAttemptTracker: authTracker,
 		shutdownChan:  make(chan struct{}),
 	}
+}
+
+// transferManagerFor returns the transfer manager for the given account, or
+// nil if the account has no target configuration.
+func (d *BridgeDriver) transferManagerFor(user string) *transfer.TransferManager {
+	return d.transferManagers[user]
 }
 
 // =========================================================================
@@ -848,7 +864,11 @@ func (c *bridgeClientDriver) handleUploadOpen(path string) (*uploadWriter, error
 	}
 
 	// Process the upload request to get the final target path
-	transferResult := c.bridgeDriver.transferManager.ProcessUpload(request)
+	transferMgr := c.bridgeDriver.transferManagerFor(c.user)
+	if transferMgr == nil {
+		return nil, fmt.Errorf("no transfer configuration for user %s", c.user)
+	}
+	transferResult := transferMgr.ProcessUpload(request)
 	if !transferResult.Success {
 		c.bridgeDriver.obs.Log("warn", fmt.Sprintf("Transfer processing failed for user %s, path %s: %v", 
 			c.user, path, transferResult.Error))
@@ -1041,8 +1061,11 @@ func (w *uploadWriter) commitToWebDAV(fileRef spool.FileRef) error {
 	}
 
 	// Ensure parent directories exist
-	err := w.clientDriver.bridgeDriver.transferManager.EnsureParentDirectories(finalPath)
-	if err != nil {
+	transferMgr := w.clientDriver.bridgeDriver.transferManagerFor(w.clientDriver.user)
+	if transferMgr == nil {
+		return fmt.Errorf("no transfer configuration for user %s", w.clientDriver.user)
+	}
+	if err := transferMgr.EnsureParentDirectories(finalPath); err != nil {
 		return fmt.Errorf("failed to ensure parent directories: %w", err)
 	}
 
@@ -1053,9 +1076,12 @@ func (w *uploadWriter) commitToWebDAV(fileRef spool.FileRef) error {
 	}
 
 	// Upload to WebDAV
-	// The collision policy is already handled by the transfer manager during path resolution
-	// We use overwrite=true here since the transfer manager has already resolved any collisions
-	err = w.clientDriver.webdavClient.Upload(w.clientDriver.context, finalPath, fileData, true)
+	// The collision policy was already applied during path resolution. Only the
+	// explicit "overwrite" policy may replace an existing object; for rename and
+	// reject the PUT carries If-None-Match so an object that appeared after
+	// resolution fails with a conflict instead of silently overwriting it.
+	overwrite := transfer.CollisionPolicy(w.clientDriver.account.Upload.CollisionPolicy) == transfer.CollisionPolicyOverwrite
+	err = w.clientDriver.webdavClient.Upload(w.clientDriver.context, finalPath, fileData, overwrite)
 	if err != nil {
 		return fmt.Errorf("WebDAV upload failed: %w", err)
 	}

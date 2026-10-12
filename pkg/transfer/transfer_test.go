@@ -1,8 +1,17 @@
 package transfer
 
 import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/amamus/ocis-ftp-bridge/pkg/errors"
+	"github.com/amamus/ocis-ftp-bridge/pkg/webdav"
 )
 
 func TestTransferManager_CalculateTargetPath(t *testing.T) {
@@ -536,7 +545,9 @@ func TestEdgeCases(t *testing.T) {
 }
 
 func TestResolveCollisionPolicies(t *testing.T) {
-	tm := NewTransferManager()
+	// Collision checks run against the WebDAV backend; seed an empty one so
+	// no collisions exist.
+	tm := NewTransferManagerWithWebDAV(context.Background(), newFakeWebDAVClient())
 
 	// Add target configuration
 	tm.AddTarget("testuser", TargetConfig{
@@ -548,21 +559,20 @@ func TestResolveCollisionPolicies(t *testing.T) {
 	})
 
 	t.Run("rename policy", func(t *testing.T) {
-		// Without a WebDAV client, rename policy should generate a unique filename
+		// Nothing exists in WebDAV, so the original filename is kept
 		finalName, err := tm.ResolveCollision("/uploads", "test.txt", CollisionPolicyRename)
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
 			return
 		}
 
-		// Should return the original filename since we can't check WebDAV
 		if finalName != "test.txt" {
-			t.Logf("rename policy returned: %s", finalName)
+			t.Errorf("expected original filename when no collision exists in WebDAV, got %q", finalName)
 		}
 	})
 
 	t.Run("reject policy without existing file", func(t *testing.T) {
-		// Without WebDAV client, should pass (assumes file doesn't exist)
+		// Nothing exists in WebDAV, so reject passes
 		finalName, err := tm.ResolveCollision("/uploads", "test.txt", CollisionPolicyReject)
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
@@ -597,40 +607,48 @@ func TestResolveCollisionPolicies(t *testing.T) {
 }
 
 func TestGenerateUniqueFilename(t *testing.T) {
-	tm := NewTransferManager()
+	t.Run("keeps original name when nothing exists in WebDAV", func(t *testing.T) {
+		tm := NewTransferManagerWithWebDAV(context.Background(), newFakeWebDAVClient())
 
-	t.Run("generates unique filename", func(t *testing.T) {
-		// This is a simplified test since GenerateUniqueFilename uses file system
-		// We'll test the logic without the file system checks
-		basePath := "/tmp/test"
-		filename := "test.txt"
-
-		// The method would normally check filesystem, but we can test the logic flow
-		result := tm.GenerateUniqueFilename(basePath, filename)
-
-		// Result should be different or same depending on whether the file exists
-		// For this test, we just ensure it returns a non-empty string
-		if result == "" {
-			t.Errorf("expected non-empty filename")
+		result, err := tm.GenerateUniqueFilename("/uploads", "test.txt")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result != "test.txt" {
+			t.Errorf("expected original filename, got %q", result)
 		}
 	})
 
-	t.Run("preserves extension", func(t *testing.T) {
+	t.Run("renames existing object and preserves extension", func(t *testing.T) {
 		// Test with various extensions
 		extensions := []string{".txt", ".pdf", ".jpg", ".tar.gz"}
 
 		for _, ext := range extensions {
 			filename := "file" + ext
-			result := tm.GenerateUniqueFilename("/tmp", filename)
+			fake := newFakeWebDAVClient("/uploads/" + filename)
+			tm := NewTransferManagerWithWebDAV(context.Background(), fake)
 
-			if result == "" {
-				t.Errorf("expected non-empty filename for extension %s", ext)
+			result, err := tm.GenerateUniqueFilename("/uploads", filename)
+			if err != nil {
+				t.Fatalf("unexpected error for %q: %v", filename, err)
 			}
 
-			// Check if extension is preserved in the result
-			if !strings.HasSuffix(result, ext) {
-				t.Logf("extension %s may not be preserved in result: %s", ext, result)
+			if result == filename {
+				t.Errorf("expected renamed filename for existing object %q, got original", filename)
 			}
+
+			// Check that the extension (per filepath.Ext) is preserved in the result
+			if !strings.HasSuffix(result, filepath.Ext(filename)) {
+				t.Errorf("extension %s not preserved in result: %s", ext, result)
+			}
+		}
+	})
+
+	t.Run("fails closed without a WebDAV client", func(t *testing.T) {
+		tm := NewTransferManager()
+
+		if _, err := tm.GenerateUniqueFilename("/uploads", "test.txt"); err == nil {
+			t.Errorf("expected error without a WebDAV client")
 		}
 	})
 }
@@ -886,7 +904,7 @@ func TestValidateTargetPathEdgeCases(t *testing.T) {
 }
 
 func TestProcessUploadIntegration(t *testing.T) {
-	tm := NewTransferManager()
+	tm := NewTransferManagerWithWebDAV(context.Background(), newFakeWebDAVClient())
 
 	// Add target configuration
 	tm.AddTarget("testuser", TargetConfig{
@@ -966,6 +984,36 @@ func TestProcessUploadIntegration(t *testing.T) {
 			t.Errorf("expected error for path traversal")
 		}
 	})
+
+	t.Run("reject policy fails for object existing in WebDAV", func(t *testing.T) {
+		rejectTM := NewTransferManagerWithWebDAV(context.Background(),
+			newFakeWebDAVClient("/uploads/scans/test.txt"))
+		rejectTM.AddTarget("testuser", TargetConfig{
+			DriveID:          "drive123",
+			Drive:           "MyDrive",
+			Root:            "/uploads",
+			CollisionPolicy: CollisionPolicyReject,
+			MaxSize:         1000000,
+		})
+
+		request := TransferRequest{
+			UserID:   "testuser",
+			Filename: "test.txt",
+			Path:     "scans",
+			Size:     1024,
+			Data:     []byte("test content"),
+		}
+
+		result := rejectTM.ProcessUpload(request)
+
+		if result.Success {
+			t.Errorf("expected failed upload for existing object under reject policy")
+		}
+
+		if result.Error == nil {
+			t.Errorf("expected error for existing object under reject policy")
+		}
+	})
 }
 
 // TestSanitizeFilenameUnicodeLength verifies that filename length is measured
@@ -1009,4 +1057,166 @@ func TestSanitizeFilenameUnicodeLength(t *testing.T) {
 // Ensure strings.HasSuffix is available
 func hasSuffix(s, suffix string) bool {
 	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
+}
+
+// fakeWebDAVClient is an in-memory webdav.Client that gives the transfer
+// manager real existence semantics without any network access.
+type fakeWebDAVClient struct {
+	mu          sync.Mutex
+	existing    map[string]bool
+	checked     []string
+	createdDirs []string
+}
+
+func newFakeWebDAVClient(existing ...string) *fakeWebDAVClient {
+	f := &fakeWebDAVClient{existing: make(map[string]bool)}
+	for _, p := range existing {
+		f.existing[p] = true
+	}
+	return f
+}
+
+func (f *fakeWebDAVClient) Upload(_ context.Context, path string, _ []byte, _ bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.existing[path] = true
+	return nil
+}
+
+func (f *fakeWebDAVClient) UploadStream(_ context.Context, path string, _ io.Reader, _ int64, _ bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.existing[path] = true
+	return nil
+}
+
+func (f *fakeWebDAVClient) CreateDirectory(_ context.Context, path string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.createdDirs = append(f.createdDirs, path)
+	f.existing[path] = true
+	return nil
+}
+
+func (f *fakeWebDAVClient) CheckPathExistence(_ context.Context, path string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.checked = append(f.checked, path)
+	return f.existing[path], nil
+}
+
+func (f *fakeWebDAVClient) DeleteFile(_ context.Context, path string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.existing, path)
+	return nil
+}
+
+func (f *fakeWebDAVClient) GetFileInfo(_ context.Context, path string) (webdav.FileInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.existing[path] {
+		return webdav.FileInfo{}, fmt.Errorf("not found: %s", path)
+	}
+	return webdav.FileInfo{Path: path, IsDirectory: false}, nil
+}
+
+func (f *fakeWebDAVClient) ValidateConfiguration(context.Context) error { return nil }
+
+func (f *fakeWebDAVClient) exists(path string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.existing[path]
+}
+
+// TestResolveCollisionUsesWebDAVExistence verifies that collision resolution
+// consults the WebDAV backend (QLT-001): an object existing only in oCIS must
+// trigger rename/reject, and a file existing only on the local filesystem
+// must NOT influence the outcome, because basePath is a WebDAV path.
+func TestResolveCollisionUsesWebDAVExistence(t *testing.T) {
+	t.Run("rename policy renames file that exists only in WebDAV", func(t *testing.T) {
+		fake := newFakeWebDAVClient("/uploads/report.pdf")
+		tm := NewTransferManagerWithWebDAV(context.Background(), fake)
+		tm.AddTarget("testuser", TargetConfig{Root: "/uploads", CollisionPolicy: CollisionPolicyRename})
+
+		finalName, err := tm.ResolveCollision("/uploads", "report.pdf", CollisionPolicyRename)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if finalName == "report.pdf" {
+			t.Errorf("expected renamed filename for existing object, got original %q", finalName)
+		}
+		if fake.exists("/uploads/" + finalName) {
+			t.Errorf("renamed filename %q already exists in WebDAV", finalName)
+		}
+	})
+
+	t.Run("rename policy keeps name when file exists only locally", func(t *testing.T) {
+		// Regression for the old os.Stat implementation: a file that happens
+		// to exist locally at the WebDAV basePath must not trigger a rename.
+		localDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(localDir, "report.pdf"), []byte("local"), 0o644); err != nil {
+			t.Fatalf("failed to create local file: %v", err)
+		}
+		fake := newFakeWebDAVClient() // nothing exists in WebDAV
+		tm := NewTransferManagerWithWebDAV(context.Background(), fake)
+		tm.AddTarget("testuser", TargetConfig{Root: localDir, CollisionPolicy: CollisionPolicyRename})
+
+		finalName, err := tm.ResolveCollision(localDir, "report.pdf", CollisionPolicyRename)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if finalName != "report.pdf" {
+			t.Errorf("expected original filename (object does not exist in WebDAV), got %q", finalName)
+		}
+	})
+
+	t.Run("reject policy rejects file that exists in WebDAV", func(t *testing.T) {
+		fake := newFakeWebDAVClient("/uploads/report.pdf")
+		tm := NewTransferManagerWithWebDAV(context.Background(), fake)
+		tm.AddTarget("testuser", TargetConfig{Root: "/uploads", CollisionPolicy: CollisionPolicyReject})
+
+		_, err := tm.ResolveCollision("/uploads", "report.pdf", CollisionPolicyReject)
+		if err == nil {
+			t.Fatal("expected reject policy to fail for existing object")
+		}
+		if !errors.IsCode(err, errors.ErrCodeAlreadyExists) {
+			t.Errorf("expected ALREADY_EXISTS error, got %v", err)
+		}
+	})
+
+	t.Run("reject policy accepts file missing from WebDAV even if present locally", func(t *testing.T) {
+		localDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(localDir, "report.pdf"), []byte("local"), 0o644); err != nil {
+			t.Fatalf("failed to create local file: %v", err)
+		}
+		fake := newFakeWebDAVClient()
+		tm := NewTransferManagerWithWebDAV(context.Background(), fake)
+		tm.AddTarget("testuser", TargetConfig{Root: localDir, CollisionPolicy: CollisionPolicyReject})
+
+		finalName, err := tm.ResolveCollision(localDir, "report.pdf", CollisionPolicyReject)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if finalName != "report.pdf" {
+			t.Errorf("expected original filename, got %q", finalName)
+		}
+	})
+}
+
+// TestCollisionPoliciesFailClosedWithoutWebDAVClient verifies that a transfer
+// manager without a WebDAV client refuses rename/reject collision handling
+// instead of silently assuming there is no collision (QLT-001).
+func TestCollisionPoliciesFailClosedWithoutWebDAVClient(t *testing.T) {
+	tm := NewTransferManager()
+
+	if _, err := tm.ResolveCollision("/uploads", "report.pdf", CollisionPolicyReject); err == nil {
+		t.Error("expected reject policy to fail without a WebDAV client")
+	}
+	if _, err := tm.ResolveCollision("/uploads", "report.pdf", CollisionPolicyRename); err == nil {
+		t.Error("expected rename policy to fail without a WebDAV client")
+	}
+	if _, err := tm.CheckCollision("/uploads/report.pdf"); err == nil {
+		t.Error("expected CheckCollision to fail without a WebDAV client")
+	}
 }
