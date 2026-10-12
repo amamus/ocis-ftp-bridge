@@ -978,5 +978,6 @@ func (m *defaultManager) GetUploadManager() UploadManager {
 // active uploads (PERF-003).
 func (m *defaultManager) CurrentUsage() (usedBytes uint64, fileCount uint64) {
 	usedBytes, activeUploads := m.uploadManager.CurrentUsage()
+	// #nosec G115 -- activeUploads is a map length, always non-negative
 	return usedBytes, uint64(activeUploads)
 }
