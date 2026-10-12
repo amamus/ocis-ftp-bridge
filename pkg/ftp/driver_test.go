@@ -449,6 +449,7 @@ func newCollisionTestDriver(t *testing.T, mock *mockWebDAVServer, spoolManager s
 		user:         "test-printer",
 		currentDir:   "/",
 		spoolUploads: make(map[string]*spoolUpload),
+		webdavClient: webdav.NewClientWithCredentials(mock.URL+"/webdav", "test-printer", "token"),
 		context:      ctx,
 		cancel:       cancel,
 	}
@@ -561,7 +562,6 @@ func TestCommitToWebDAVHonorsCollisionPolicy(t *testing.T) {
 	setup := func(t *testing.T, policy string, existing map[string][]byte) (*mockWebDAVServer, *uploadWriter, spool.FileRef) {
 		mock := newMockWebDAVServer(t, existing)
 		_, client := newCollisionTestDriver(t, mock, spoolManager, policy, "/")
-		client.webdavClient = webdav.NewClientWithCredentials(mock.URL+"/webdav", "test-printer", "token")
 		w := &uploadWriter{
 			clientDriver: client,
 			uploadID:     "upload-1",

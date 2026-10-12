@@ -1081,10 +1081,11 @@ func TestUploadManager_CapacityReleasedOnFinishAndAbort(t *testing.T) {
 	_, err = uploadManager.WriteChunk(d, make([]byte, 600))
 	require.NoError(t, err)
 
-	// Aborting D releases its bytes again: a full 1000-byte upload fits
+	// Aborting D releases its bytes again: with B's 400 bytes still held,
+	// E can write exactly the remaining 600 bytes
 	require.NoError(t, uploadManager.AbortUpload(d))
 	e := start("e.txt")
-	_, err = uploadManager.WriteChunk(e, make([]byte, 1000))
+	_, err = uploadManager.WriteChunk(e, make([]byte, 600))
 	require.NoError(t, err)
 	_, err = uploadManager.WriteChunk(e, make([]byte, 1))
 	assert.Equal(t, ErrSpoolCapacityExceeded, err)

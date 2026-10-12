@@ -203,9 +203,11 @@ type defaultManager struct {
 
 // uploadManager implements UploadManager.
 type uploadManager struct {
-	spoolDir       string
-	maxTotalSize   uint64
-	currentUsage   uint64
+	spoolDir     string
+	maxTotalSize uint64
+	// currentUsage is the sum of bytes written to active uploads.
+	// It is guarded by mu.
+	currentUsage  uint64
 	activeUploads map[string]*Upload
 	mu            sync.RWMutex
 }
@@ -289,7 +291,9 @@ func (m *uploadManager) StartUpload(ctx context.Context, userID, filename, targe
 		return nil, ErrFileTooLarge
 	}
 
-	// Check current usage + this file wouldn't exceed capacity
+	// Advisory capacity check: for a known expected size, reject early when
+	// current usage plus this file wouldn't fit. FTP uploads pass an unknown
+	// size (0 here), so the real enforcement happens per chunk in WriteChunk.
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -348,9 +352,10 @@ func (m *uploadManager) StartUpload(ctx context.Context, userID, filename, targe
 		Context:       uploadCtx,
 	}
 
-	// Track the upload
+	// Track the upload. Bytes are accounted as chunks are written in
+	// WriteChunk, not reserved here, so unknown-size uploads are enforced
+	// against the actual bytes on disk.
 	m.activeUploads[uploadID] = upload
-	atomic.AddUint64(&m.currentUsage, uint64(expectedSize))
 
 	return upload, nil
 }
@@ -380,9 +385,23 @@ func (m *uploadManager) WriteChunk(upload *Upload, data []byte) (int, error) {
 		return 0, ErrFileTooLarge
 	}
 
+	// Reserve global spool capacity for this chunk before writing, so
+	// concurrent uploads cannot overshoot max_total_size
+	m.mu.Lock()
+	if m.currentUsage+uint64(len(data)) > m.maxTotalSize {
+		m.mu.Unlock()
+		return 0, ErrSpoolCapacityExceeded
+	}
+	m.currentUsage += uint64(len(data))
+	m.mu.Unlock()
+
 	// Write the data
 	n, err := upload.TempFile.Write(data)
 	if err != nil {
+		// Roll back the reservation: the chunk was not accepted
+		m.mu.Lock()
+		m.currentUsage -= uint64(len(data))
+		m.mu.Unlock()
 		return n, fmt.Errorf("failed to write upload chunk: %w", err)
 	}
 
@@ -463,10 +482,10 @@ func (m *uploadManager) FinishUpload(upload *Upload) (FileRef, error) {
 		Status:    FileStatusCommitted,
 	}
 
-	// Remove from active uploads
-	m.mu.Lock()
-	delete(m.activeUploads, upload.ID)
-	m.mu.Unlock()
+	// Remove from active uploads and release the accounted bytes. The spooled
+	// file stays on disk until the caller deletes it, but the upload is no
+	// longer active.
+	m.releaseUploadBytes(upload)
 
 	return fileRef, nil
 }
@@ -488,12 +507,29 @@ func (m *uploadManager) AbortUpload(upload *Upload) error {
 		os.Remove(upload.TempPath)
 	}
 
-	// Remove from active uploads
-	m.mu.Lock()
-	delete(m.activeUploads, upload.ID)
-	m.mu.Unlock()
+	// Remove from active uploads and release the accounted bytes
+	m.releaseUploadBytes(upload)
 
 	return nil
+}
+
+// releaseUploadBytes removes an upload from the active set and releases its
+// accounted bytes. It is idempotent: only the first call for a given upload
+// releases bytes.
+func (m *uploadManager) releaseUploadBytes(upload *Upload) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, active := m.activeUploads[upload.ID]; !active {
+		return
+	}
+	delete(m.activeUploads, upload.ID)
+	// #nosec G115 -- BytesReceived is a non-negative byte count
+	used := uint64(upload.BytesReceived)
+	if m.currentUsage >= used {
+		m.currentUsage -= used
+	} else {
+		m.currentUsage = 0
+	}
 }
 
 // GetUpload retrieves an active upload by ID.
@@ -503,11 +539,15 @@ func (m *uploadManager) GetUpload(uploadID string) *Upload {
 	return m.activeUploads[uploadID]
 }
 
-// RemoveUpload removes an upload from the active uploads map.
+// RemoveUpload removes an upload from the active uploads map and releases
+// its accounted bytes.
 func (m *uploadManager) RemoveUpload(uploadID string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.activeUploads, uploadID)
+	m.mu.RLock()
+	upload, active := m.activeUploads[uploadID]
+	m.mu.RUnlock()
+	if active {
+		m.releaseUploadBytes(upload)
+	}
 }
 
 // generateUploadID generates a unique upload ID.
