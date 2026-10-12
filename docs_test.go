@@ -204,3 +204,20 @@ func TestScalingDocsMultiReplica(t *testing.T) {
 		t.Error("docs/security.md still advises running a single replica; the bridge is multi-replica safe with a per-replica emptyDir spool and sessionAffinity (issue #71, QLT-010)")
 	}
 }
+
+// TestSecurityDocActiveMode guards the SEC-005 documentation: the active FTP
+// mode flag and its residual risk must be documented in docs/security.md and
+// exposed in config.yaml.example.
+func TestSecurityDocActiveMode(t *testing.T) {
+	doc := string(readRepoFile(t, "docs/security.md"))
+	if !strings.Contains(doc, "allow_active_mode") {
+		t.Error("docs/security.md does not document server.allow_active_mode (SEC-005)")
+	}
+	if !strings.Contains(doc, "peer") {
+		t.Error("docs/security.md does not document the peer-IP match enforcement for data connections (SEC-005)")
+	}
+	example := string(readRepoFile(t, "config.yaml.example"))
+	if !strings.Contains(example, "allow_active_mode") {
+		t.Error("config.yaml.example does not expose server.allow_active_mode (SEC-005)")
+	}
+}

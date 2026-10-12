@@ -383,6 +383,23 @@ server:
 - Configure port forwarding for the passive range
 - Test with `curl -v ftp://...` to verify the passive IP
 
+#### Active FTP Mode (PORT/EPRT)
+
+Active mode is **enabled by default** because many printers only support
+PORT/EPRT. The bridge sets ftpserverlib's `IPMatchRequired` explicitly for
+both active and passive data connections: the server only ever dials the IP
+of the control-connection peer, never a third-party address, so classic
+FTP bounce attacks are not possible.
+
+Residual risk: in active mode the server opens an **outbound** connection
+to a client-chosen port on the client's own IP. Restrict egress with the
+firewall rules above, and disable active mode if no client needs it:
+
+```yaml
+server:
+  allow_active_mode: false   # Passive mode only
+```
+
 ### Rate Limiting and Connection Controls
 
 **Connection and Authentication Limits:**

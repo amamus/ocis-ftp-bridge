@@ -563,7 +563,13 @@ func (d *BridgeDriver) GetSettings() (*ftpserver.Settings, error) {
 	if !d.cfg.Server.TLS.Enabled {
 		d.obs.Log("warn", "Plain FTP is enabled! Credentials and data will be transmitted in cleartext. This is a security risk. Enable TLS for production use.")
 	}
-	
+
+	// Make the active-mode residual risk visible at startup: the server
+	// dials the client's own IP on a client-chosen port (SEC-005).
+	if d.cfg.Server.AllowActiveMode {
+		d.obs.Log("info", "FTP active mode (PORT/EPRT) is enabled: the server dials the client's own IP on a client-chosen port; restrict egress with a firewall (SEC-005)")
+	}
+
 	settings := &ftpserver.Settings{
 		ListenAddr:       d.cfg.Server.Listen,
 		PublicHost:      d.cfg.Server.Passive.PublicIP,
@@ -586,7 +592,12 @@ func (d *BridgeDriver) GetSettings() (*ftpserver.Settings, error) {
 			}
 			return ftpserver.TLSRequirement(0) // ClearOrEncrypted = 0
 		}(),
-		DisableActiveMode:     false,
+		DisableActiveMode:     !d.cfg.Server.AllowActiveMode,
+		// SEC-005: require the data-connection peer IP to match the control
+		// connection peer IP for both active and passive transfers. Set
+		// explicitly instead of relying on the library's zero value.
+		ActiveConnectionsCheck: ftpserver.IPMatchRequired,
+		PasvConnectionsCheck:   ftpserver.IPMatchRequired,
 		DisableSite:           true,
 		DisableLISTArgs:       true,
 	}
