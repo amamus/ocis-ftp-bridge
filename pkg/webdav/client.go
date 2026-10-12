@@ -77,16 +77,15 @@ func NewWebDAVClientWithHTTP(baseURL, username, token string, httpClient *http.C
 
 // NewWebDAVClientFromGraph creates a WebDAV client from a resolved graph drive.
 // This is the preferred way to create a WebDAV client once a drive has been resolved.
-func NewWebDAVClientFromGraph(drive graph.Drive, username, token string) Client {
-	// Use the WebDAV URL from the resolved drive
-	webDAVURL := drive.WebDAVURL
-	if webDAVURL == "" {
-		// Fallback: construct from base URL if not provided by Graph API
-		// This shouldn't normally happen if the Graph API provides webDavUrl
-		webDAVURL = "https://ocis.example.com/webdav"
+// It returns ErrEmptyWebDAVURL when the drive carries no WebDAV URL: silently
+// falling back to a hard-coded host would send the app token to an unintended
+// server, since the client attaches it via Basic auth on every request (SEC-006).
+func NewWebDAVClientFromGraph(drive graph.Drive, username, token string) (Client, error) {
+	if drive.WebDAVURL == "" {
+		return nil, fmt.Errorf("%w: drive %q (%s)", ErrEmptyWebDAVURL, drive.Name, drive.ID)
 	}
 
-	return NewWebDAVClient(webDAVURL, username, token)
+	return NewWebDAVClient(drive.WebDAVURL, username, token), nil
 }
 
 // Upload uploads a file to the specified path.

@@ -481,14 +481,34 @@ func TestNewWebDAVClientFromGraph(t *testing.T) {
 		WebDAVURL: "https://ocis.example.com/webdav",
 	}
 
-	client := NewWebDAVClientFromGraph(drive, "testuser", "testtoken")
+	client, err := NewWebDAVClientFromGraph(drive, "testuser", "testtoken")
+	require.NoError(t, err)
 	require.NotNil(t, client)
+
+	// The client targets the drive's WebDAV URL
+	wc, ok := client.(*webdavClient)
+	require.True(t, ok)
+	assert.Equal(t, "https://ocis.example.com/webdav", wc.baseURL)
 
 	// The client should be usable
 	ctx := context.Background()
-	_, err := client.CheckPathExistence(ctx, "/")
+	_, err = client.CheckPathExistence(ctx, "/")
 	// This will fail because the server doesn't exist, but the client should be properly created
 	require.Error(t, err)
+}
+
+func TestNewWebDAVClientFromGraph_EmptyWebDAVURL(t *testing.T) {
+	t.Parallel()
+
+	// SEC-006: when the Graph API response omits the WebDAV URL, the client
+	// must not fall back to a hard-coded host. The client attaches the app
+	// token via Basic auth on every request, so a fallback URL would leak
+	// the token to an unintended server.
+	drive := graph.Drive{ID: "drive1", Name: "Test Drive", WebDAVURL: ""}
+	client, err := NewWebDAVClientFromGraph(drive, "testuser", "testtoken")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrEmptyWebDAVURL)
+	assert.Nil(t, client)
 }
 
 func TestWebDAVClient_EmptyData(t *testing.T) {
