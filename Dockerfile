@@ -6,7 +6,9 @@
 # ============================================================================
 # Build stage
 # ============================================================================
-FROM golang:1.27-alpine AS builder
+# Pinned to the 1.27.2 release and its manifest-list digest: Go 1.27.0/1.27.1
+# ship 9 stdlib CVEs fixed in 1.27.2 (GO-2026-6603...6617, SEC-007).
+FROM golang:1.27.2-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d AS builder
 
 # Set build arguments
 ARG APP_NAME=ocis-ftp-bridge

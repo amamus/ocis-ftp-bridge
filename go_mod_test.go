@@ -10,14 +10,14 @@ import (
 
 // minimumGoVersion is the minimum Go toolchain the module must declare.
 // Go 1.27.0/1.27.1 ship 9 standard-library vulnerabilities fixed in
-// 1.27.2 (GO-2026-6603 … GO-2026-6617, finding SEC-007), so both the go
-// directive and the toolchain pin must require at least this version.
+// 1.27.2 (GO-2026-6603 … GO-2026-6617, finding SEC-007), so the go
+// directive must require at least this version. The go directive is the
+// enforcement point: any older toolchain refuses to build (or auto-switches
+// to a newer one). A redundant "toolchain go1.27.2" line is deliberately not
+// required — "go mod tidy" strips it and its presence breaks readonly builds.
 var minimumGoVersion = [3]int{1, 27, 2}
 
-var (
-	goDirectiveRE        = regexp.MustCompile(`(?m)^go\s+(\d+)\.(\d+)(?:\.(\d+))?`)
-	toolchainDirectiveRE = regexp.MustCompile(`(?m)^toolchain\s+go(\d+)\.(\d+)(?:\.(\d+))?`)
-)
+var goDirectiveRE = regexp.MustCompile(`(?m)^go\s+(\d+)\.(\d+)(?:\.(\d+))?`)
 
 // parseGoModVersion extracts a version from go.mod using the given directive
 // regexp and fails the test if the directive is missing or unparsable.
@@ -60,17 +60,11 @@ func versionString(v [3]int) string {
 
 // TestGoModRequiresPatchedToolchain guards finding SEC-007: the module must
 // not build with Go 1.27.0/1.27.1, which ship 9 stdlib CVEs fixed in
-// 1.27.2. Both the go directive and the toolchain pin are checked.
+// 1.27.2.
 func TestGoModRequiresPatchedToolchain(t *testing.T) {
-	min := versionString(minimumGoVersion)
-
 	goVer := parseGoModVersion(t, goDirectiveRE, "go")
 	if !atLeast(goVer, minimumGoVersion) {
-		t.Errorf("go.mod go directive = %s, want >= %s (Go 1.27.0/1.27.1 ship 9 stdlib CVEs fixed in 1.27.2, SEC-007)", versionString(goVer), min)
-	}
-
-	toolchainVer := parseGoModVersion(t, toolchainDirectiveRE, "toolchain")
-	if !atLeast(toolchainVer, minimumGoVersion) {
-		t.Errorf("go.mod toolchain directive = %s, want >= %s (pin the exact toolchain so builds cannot silently use a vulnerable Go, SEC-007)", versionString(toolchainVer), min)
+		t.Errorf("go.mod go directive = %s, want >= %s (Go 1.27.0/1.27.1 ship 9 stdlib CVEs fixed in 1.27.2, SEC-007)",
+			versionString(goVer), versionString(minimumGoVersion))
 	}
 }

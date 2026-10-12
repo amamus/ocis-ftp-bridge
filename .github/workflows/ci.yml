@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GO_VERSION: '1.27'
+  GO_VERSION: '1.27.2'
   BINARY_NAME: 'ocis-ftp-bridge'
   FTP_PORT: '2121'
   # The e2e job runs a mock oCIS WebDAV server on port 9200, so the bridge's
