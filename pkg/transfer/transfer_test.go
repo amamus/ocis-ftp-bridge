@@ -607,40 +607,48 @@ func TestResolveCollisionPolicies(t *testing.T) {
 }
 
 func TestGenerateUniqueFilename(t *testing.T) {
-	tm := NewTransferManager()
+	t.Run("keeps original name when nothing exists in WebDAV", func(t *testing.T) {
+		tm := NewTransferManagerWithWebDAV(context.Background(), newFakeWebDAVClient())
 
-	t.Run("generates unique filename", func(t *testing.T) {
-		// This is a simplified test since GenerateUniqueFilename uses file system
-		// We'll test the logic without the file system checks
-		basePath := "/tmp/test"
-		filename := "test.txt"
-
-		// The method would normally check filesystem, but we can test the logic flow
-		result := tm.GenerateUniqueFilename(basePath, filename)
-
-		// Result should be different or same depending on whether the file exists
-		// For this test, we just ensure it returns a non-empty string
-		if result == "" {
-			t.Errorf("expected non-empty filename")
+		result, err := tm.GenerateUniqueFilename("/uploads", "test.txt")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result != "test.txt" {
+			t.Errorf("expected original filename, got %q", result)
 		}
 	})
 
-	t.Run("preserves extension", func(t *testing.T) {
+	t.Run("renames existing object and preserves extension", func(t *testing.T) {
 		// Test with various extensions
 		extensions := []string{".txt", ".pdf", ".jpg", ".tar.gz"}
 
 		for _, ext := range extensions {
 			filename := "file" + ext
-			result := tm.GenerateUniqueFilename("/tmp", filename)
+			fake := newFakeWebDAVClient("/uploads/" + filename)
+			tm := NewTransferManagerWithWebDAV(context.Background(), fake)
 
-			if result == "" {
-				t.Errorf("expected non-empty filename for extension %s", ext)
+			result, err := tm.GenerateUniqueFilename("/uploads", filename)
+			if err != nil {
+				t.Fatalf("unexpected error for %q: %v", filename, err)
 			}
 
-			// Check if extension is preserved in the result
-			if !strings.HasSuffix(result, ext) {
-				t.Logf("extension %s may not be preserved in result: %s", ext, result)
+			if result == filename {
+				t.Errorf("expected renamed filename for existing object %q, got original", filename)
 			}
+
+			// Check that the extension (per filepath.Ext) is preserved in the result
+			if !strings.HasSuffix(result, filepath.Ext(filename)) {
+				t.Errorf("extension %s not preserved in result: %s", ext, result)
+			}
+		}
+	})
+
+	t.Run("fails closed without a WebDAV client", func(t *testing.T) {
+		tm := NewTransferManager()
+
+		if _, err := tm.GenerateUniqueFilename("/uploads", "test.txt"); err == nil {
+			t.Errorf("expected error without a WebDAV client")
 		}
 	})
 }
