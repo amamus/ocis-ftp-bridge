@@ -552,3 +552,14 @@ func TestParseArgon2IDDigestLengthLimit(t *testing.T) {
 		t.Fatal("expected 4097-byte digest to be rejected")
 	}
 }
+
+// TestDefaultHTTPAddressIsLoopback guards SEC-001: the operations HTTP server
+// must bind to loopback by default. Metrics and readiness details must not be
+// exposed on all interfaces; production deployments set http.address
+// explicitly and front the endpoint with a TLS-terminating proxy.
+func TestDefaultHTTPAddressIsLoopback(t *testing.T) {
+	cfg := New()
+	if cfg.HTTP.Address != "127.0.0.1:9090" {
+		t.Errorf("default http.address = %q, want 127.0.0.1:9090 (SEC-001)", cfg.HTTP.Address)
+	}
+}
