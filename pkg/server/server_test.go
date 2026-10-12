@@ -2,8 +2,19 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"io"
+	"math/big"
+	"net"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -164,5 +175,217 @@ func TestGeneratedAuthPasswordWhenUnset(t *testing.T) {
 	}
 	if cfg.HTTP.Auth.Password == "" {
 		t.Error("http.auth.password was not generated for enabled basic auth (SEC-001)")
+	}
+}
+
+// writeTestCertificate generates a self-signed certificate with an RSA key of
+// the given size and writes the cert/key PEM files into dir.
+func writeTestCertificate(t *testing.T, dir string, keyBits int) (certPath, keyPath string) {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, keyBits)
+	if err != nil {
+		t.Fatalf("failed to generate RSA key: %v", err)
+	}
+
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "ocis-ftp-bridge-test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     []string{"localhost"},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("failed to create certificate: %v", err)
+	}
+
+	certPath = filepath.Join(dir, "cert.pem")
+	keyPath = filepath.Join(dir, "key.pem")
+
+	certOut, err := os.Create(certPath)
+	if err != nil {
+		t.Fatalf("failed to create certificate file: %v", err)
+	}
+	if err := pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: der}); err != nil {
+		certOut.Close()
+		t.Fatalf("failed to encode certificate: %v", err)
+	}
+	certOut.Close()
+
+	keyOut, err := os.Create(keyPath)
+	if err != nil {
+		t.Fatalf("failed to create key file: %v", err)
+	}
+	if err := pem.Encode(keyOut, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}); err != nil {
+		keyOut.Close()
+		t.Fatalf("failed to encode key: %v", err)
+	}
+	keyOut.Close()
+
+	return certPath, keyPath
+}
+
+// TestNewValidatesTLSConfig guards QLT-003: server.New must validate the TLS
+// configuration at startup so a missing, unreadable, expired, or weak-key
+// certificate fails fast instead of when the first FTPS connection arrives.
+func TestNewValidatesTLSConfig(t *testing.T) {
+	t.Run("missing certificate file", func(t *testing.T) {
+		cfg := testConfig(t)
+		cfg.Server.TLS.Enabled = true
+		cfg.Server.TLS.Cert = filepath.Join(t.TempDir(), "does-not-exist.pem")
+		cfg.Server.TLS.Key = filepath.Join(t.TempDir(), "does-not-exist-key.pem")
+
+		if _, err := New(cfg, noopObs{}); err == nil {
+			t.Error("New with TLS enabled but missing certificate files = nil error, want error (QLT-003)")
+		}
+	})
+
+	t.Run("weak RSA key", func(t *testing.T) {
+		dir := t.TempDir()
+		certPath, keyPath := writeTestCertificate(t, dir, 1024)
+
+		cfg := testConfig(t)
+		cfg.Server.TLS.Enabled = true
+		cfg.Server.TLS.Cert = certPath
+		cfg.Server.TLS.Key = keyPath
+
+		if _, err := New(cfg, noopObs{}); err == nil {
+			t.Error("New with TLS enabled and a 1024-bit RSA key = nil error, want error (QLT-003)")
+		}
+	})
+
+	t.Run("valid certificate", func(t *testing.T) {
+		dir := t.TempDir()
+		certPath, keyPath := writeTestCertificate(t, dir, 2048)
+
+		cfg := testConfig(t)
+		cfg.Server.TLS.Enabled = true
+		cfg.Server.TLS.Cert = certPath
+		cfg.Server.TLS.Key = keyPath
+
+		if _, err := New(cfg, noopObs{}); err != nil {
+			t.Errorf("New with TLS enabled and a valid certificate = %v, want nil (QLT-003)", err)
+		}
+	})
+}
+
+// freeLoopbackAddr returns a loopback host:port with a currently free port.
+func freeLoopbackAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to reserve a port: %v", err)
+	}
+	defer ln.Close()
+	return ln.Addr().String()
+}
+
+// getMetricsBody fetches /metrics and returns the response body, or an empty
+// string while the server is not yet accepting connections.
+func getMetricsBody(client *http.Client, base string) string {
+	resp, err := client.Get(base + "/metrics")
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// hasSpoolCapacity reports whether the metrics body contains the spool
+// capacity gauge set to want.
+func hasSpoolCapacity(body string, want float64) bool {
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "ocis_ftp_spool_capacity_bytes ") {
+			fields := strings.Fields(line)
+			if len(fields) != 2 {
+				return false
+			}
+			got, err := strconv.ParseFloat(fields[1], 64)
+			return err == nil && got == want
+		}
+	}
+	return false
+}
+
+// TestRunStartsSpoolMonitor guards QLT-003: the spool monitor must be started
+// with the service lifecycle so the spool metrics are registered on /metrics
+// and the capacity gauge reflects the configured spool size.
+func TestRunStartsSpoolMonitor(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.HTTP.Auth.Enabled = false
+	cfg.Server.Listen = freeLoopbackAddr(t)
+	cfg.Spool.Monitoring.CheckInterval = 50 * time.Millisecond
+
+	svc, err := New(cfg, noopObs{})
+	if err != nil {
+		t.Fatalf("failed to construct service: %v", err)
+	}
+	s, ok := svc.(*service)
+	if !ok {
+		t.Fatalf("expected *service, got %T", svc)
+	}
+	ops, ok := s.httpServer.(*bridgehttp.OperationsServer)
+	if !ok {
+		t.Fatalf("expected *http.OperationsServer, got %T", s.httpServer)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runErr := make(chan error, 1)
+	go func() { runErr <- svc.Run(ctx) }()
+
+	addr := ""
+	for i := 0; i < 100; i++ {
+		if addr = ops.Addr(); addr != "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if addr == "" {
+		cancel()
+		<-runErr
+		t.Fatal("operations server did not bind a listener")
+	}
+
+	// Poll /metrics until the spool monitor has published the configured
+	// capacity. The monitor sets the capacity gauge on Start, so this proves
+	// the monitor is wired into the service lifecycle.
+	client := &http.Client{Timeout: 10 * time.Second}
+	base := "http://" + addr
+	var body string
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		body = getMetricsBody(client, base)
+		if hasSpoolCapacity(body, float64(cfg.Spool.MaxSize)) {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			<-runErr
+			t.Fatalf("spool capacity metric did not appear on /metrics (QLT-003); last body:\n%s", body)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	for _, name := range []string{
+		"ocis_ftp_spool_size_bytes",
+		"ocis_ftp_spool_file_count",
+		"ocis_ftp_spool_usage_percent",
+		"ocis_ftp_spool_capacity_exceeded_total",
+	} {
+		if !strings.Contains(body, name) {
+			t.Errorf("/metrics missing %q (QLT-003)", name)
+		}
+	}
+
+	cancel()
+	if err := <-runErr; err != nil {
+		t.Errorf("Run returned error: %v", err)
 	}
 }
