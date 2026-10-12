@@ -623,3 +623,30 @@ func TestUploadStreamDoesNotRetryNonSeekableBody(t *testing.T) {
 	assert.ErrorIs(t, err, ErrTemporaryFailure)
 	assert.Equal(t, int32(1), atomic.LoadInt32(&puts), "a body that cannot be rewound must not be retried")
 }
+
+// TestControlOperationHasDeadline verifies that WebDAV control operations
+// fail on their own per-call deadline instead of hanging forever once the
+// HTTP client's total Timeout is gone (PERF-001). Uploads are exempt: their
+// duration scales with the file size.
+func TestControlOperationHasDeadline(t *testing.T) {
+	// Not parallel: mutates the package-level controlOpTimeout.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done() // hang until the client gives up
+	}))
+	defer server.Close()
+
+	// The injected client's own total timeout (2s) is far above the control
+	// deadline, so a fast failure can only come from the per-call deadline.
+	httpClient := &http.Client{Timeout: 2 * time.Second}
+	client := NewWebDAVClientWithHTTP(server.URL, "user", "token", httpClient)
+
+	old := controlOpTimeout
+	controlOpTimeout = 100 * time.Millisecond
+	defer func() { controlOpTimeout = old }()
+
+	start := time.Now()
+	_, err := client.CheckPathExistence(context.Background(), "/anything")
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), time.Second,
+		"control operations must fail on their own deadline (PERF-001)")
+}

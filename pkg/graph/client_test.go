@@ -356,3 +356,29 @@ func TestDefaultHTTPClientHasNoTotalTimeout(t *testing.T) {
 	assert.Equal(t, 10*time.Second, transport.ResponseHeaderTimeout,
 		"response header timeout must remain as the hang guard")
 }
+
+// TestGraphCallHasDeadline verifies that a Graph API call fails on its own
+// per-call deadline instead of hanging forever once the HTTP client's total
+// Timeout is gone (PERF-001).
+func TestGraphCallHasDeadline(t *testing.T) {
+	// Not parallel: mutates the package-level graphOpTimeout.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done() // hang until the client gives up
+	}))
+	defer server.Close()
+
+	// The injected client's own total timeout (2s) is far above the call
+	// deadline, so a fast failure can only come from the per-call deadline.
+	httpClient := &http.Client{Timeout: 2 * time.Second}
+	client := NewLibreGraphClientWithHTTP(server.URL, "user", "token", httpClient)
+
+	old := graphOpTimeout
+	graphOpTimeout = 100 * time.Millisecond
+	defer func() { graphOpTimeout = old }()
+
+	start := time.Now()
+	_, err := client.ResolveDrive("some-drive-id")
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), time.Second,
+		"Graph API calls must fail on their own deadline (PERF-001)")
+}
