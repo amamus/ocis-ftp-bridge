@@ -99,8 +99,8 @@ observability:
 # ============================================================================
 http:
   # Address for health, readiness, and metrics endpoints
-  # Must match the port exposed in Dockerfile and docker-compose.yaml (9200)
-  address: ":9200"
+  # Must match the code default and the port exposed in the Dockerfile (9090)
+  address: ":9090"
   
   # Authentication configuration for HTTP endpoints
   # Enabled by default for security
