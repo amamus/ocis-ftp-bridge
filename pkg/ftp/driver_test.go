@@ -9,12 +9,15 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,8 +25,10 @@ import (
 	"golang.org/x/crypto/argon2"
 
 	"github.com/amamus/ocis-ftp-bridge/pkg/config"
+	"github.com/amamus/ocis-ftp-bridge/pkg/errors"
 	"github.com/amamus/ocis-ftp-bridge/pkg/observability"
 	"github.com/amamus/ocis-ftp-bridge/pkg/spool"
+	"github.com/amamus/ocis-ftp-bridge/pkg/webdav"
 )
 
 // noopObs is a no-op observability.Client for tests.
@@ -284,7 +289,12 @@ func TestHandleUploadOpenPathMapping(t *testing.T) {
 		t.Fatalf("failed to create spool manager: %v", err)
 	}
 
+	// The driver resolves collisions against the WebDAV backend, so point the
+	// config at a mock with real 404 semantics.
+	mock := newMockWebDAVServer(t, nil)
+
 	cfg := config.New()
+	cfg.OCIS.WebDAVURL = mock.URL + "/webdav"
 	cfg.Accounts = []config.AccountConfig{
 		{
 			Username: "test-printer",
@@ -331,4 +341,268 @@ func TestHandleUploadOpenPathMapping(t *testing.T) {
 			}
 		})
 	}
+}
+
+// mockWebDAVServer is an httptest server implementing just enough WebDAV for
+// driver tests: HEAD with real 404 semantics, MKCOL, and PUT that honors
+// If-None-Match (412 when the object exists and the header is "*").
+type mockWebDAVServer struct {
+	*httptest.Server
+	mu         sync.Mutex
+	files      map[string][]byte
+	putHeaders []http.Header
+	mkcolPaths []string
+}
+
+func newMockWebDAVServer(t *testing.T, existing map[string][]byte) *mockWebDAVServer {
+	t.Helper()
+	m := &mockWebDAVServer{files: make(map[string][]byte)}
+	for p, data := range existing {
+		m.files[p] = data
+	}
+	m.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/webdav")
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		switch r.Method {
+		case http.MethodHead:
+			if _, ok := m.files[path]; ok {
+				w.WriteHeader(http.StatusOK)
+			} else {
+				w.WriteHeader(http.StatusNotFound)
+			}
+		case "MKCOL":
+			m.mkcolPaths = append(m.mkcolPaths, path)
+			w.WriteHeader(http.StatusCreated)
+		case http.MethodPut:
+			m.putHeaders = append(m.putHeaders, r.Header.Clone())
+			if r.Header.Get("If-None-Match") == "*" {
+				if _, ok := m.files[path]; ok {
+					w.WriteHeader(http.StatusPreconditionFailed)
+					return
+				}
+			}
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			m.files[path] = body
+			w.WriteHeader(http.StatusCreated)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	}))
+	t.Cleanup(m.Server.Close)
+	return m
+}
+
+func (m *mockWebDAVServer) fileExists(path string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.files[path]
+	return ok
+}
+
+func (m *mockWebDAVServer) fileContent(path string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return string(m.files[path])
+}
+
+func (m *mockWebDAVServer) lastPUTHeader() http.Header {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.putHeaders) == 0 {
+		return http.Header{}
+	}
+	return m.putHeaders[len(m.putHeaders)-1]
+}
+
+// newCollisionTestDriver builds a BridgeDriver whose accounts resolve against
+// the mock WebDAV server, plus a session client for the given account.
+func newCollisionTestDriver(t *testing.T, mock *mockWebDAVServer, spoolManager spool.Manager, policy, root string) (*BridgeDriver, *bridgeClientDriver) {
+	t.Helper()
+	cfg := config.New()
+	cfg.OCIS.WebDAVURL = mock.URL + "/webdav"
+	cfg.Accounts = []config.AccountConfig{
+		{
+			Username: "test-printer",
+			Target:   config.TargetConfig{DriveID: "test-drive-id", Root: root},
+			Upload:   config.UploadConfig{CollisionPolicy: policy, MaxSize: 1024 * 1024},
+		},
+	}
+	d := NewBridgeDriver(cfg, noopObs{}, spoolManager, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	client := &bridgeClientDriver{
+		bridgeDriver: d,
+		account:      &cfg.Accounts[0],
+		user:         "test-printer",
+		currentDir:   "/",
+		spoolUploads: make(map[string]*spoolUpload),
+		context:      ctx,
+		cancel:       cancel,
+	}
+	return d, client
+}
+
+// TestHandleUploadOpenCollisionRenameAgainstWebDAV verifies that the FTP driver
+// resolves rename collisions against oCIS (QLT-001): when the target object
+// already exists in WebDAV, the upload must be spooled under a different name.
+func TestHandleUploadOpenCollisionRenameAgainstWebDAV(t *testing.T) {
+	mock := newMockWebDAVServer(t, map[string][]byte{"/uploads/report.pdf": []byte("previous scan")})
+
+	spoolDir := t.TempDir()
+	spoolManager, err := spool.NewManager(spoolDir, 1024*1024)
+	if err != nil {
+		t.Fatalf("failed to create spool manager: %v", err)
+	}
+
+	_, client := newCollisionTestDriver(t, mock, spoolManager, "rename", "/")
+
+	w, err := client.handleUploadOpen("/uploads/report.pdf")
+	if err != nil {
+		t.Fatalf("handleUploadOpen failed: %v", err)
+	}
+	defer spoolManager.GetUploadManager().AbortUpload(w.upload)
+
+	if w.spoolUpload.path == "/uploads/report.pdf" {
+		t.Errorf("expected renamed target path for existing object, got original %q", w.spoolUpload.path)
+	}
+	if mock.fileExists(w.spoolUpload.path) {
+		t.Errorf("resolved target path %q already exists in WebDAV", w.spoolUpload.path)
+	}
+}
+
+// TestHandleUploadOpenCollisionRejectAgainstWebDAV verifies that the reject
+// collision policy actually rejects a STOR when the object exists in oCIS
+// (QLT-001).
+func TestHandleUploadOpenCollisionRejectAgainstWebDAV(t *testing.T) {
+	mock := newMockWebDAVServer(t, map[string][]byte{"/uploads/report.pdf": []byte("previous scan")})
+
+	spoolDir := t.TempDir()
+	spoolManager, err := spool.NewManager(spoolDir, 1024*1024)
+	if err != nil {
+		t.Fatalf("failed to create spool manager: %v", err)
+	}
+
+	_, client := newCollisionTestDriver(t, mock, spoolManager, "reject", "/")
+
+	_, err = client.handleUploadOpen("/uploads/report.pdf")
+	if err == nil {
+		t.Fatal("expected STOR to be rejected for existing object")
+	}
+	if !errors.IsCode(err, errors.ErrCodeAlreadyExists) {
+		t.Errorf("expected ALREADY_EXISTS error, got %v", err)
+	}
+}
+
+// TestHandleUploadOpenIgnoresLocalFilesystem verifies the collision check runs
+// against WebDAV, not the local filesystem (QLT-001): a file that exists only
+// locally at the target path must not trigger a rename.
+func TestHandleUploadOpenIgnoresLocalFilesystem(t *testing.T) {
+	mock := newMockWebDAVServer(t, nil)
+
+	// A local file exists exactly where the WebDAV target path would resolve.
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "uploads"), 0o755); err != nil {
+		t.Fatalf("failed to create local dir: %v", err)
+	}
+	wantTarget := filepath.Join(root, "uploads", "report.pdf")
+	if err := os.WriteFile(wantTarget, []byte("local"), 0o644); err != nil {
+		t.Fatalf("failed to create local file: %v", err)
+	}
+
+	spoolDir := t.TempDir()
+	spoolManager, err := spool.NewManager(spoolDir, 1024*1024)
+	if err != nil {
+		t.Fatalf("failed to create spool manager: %v", err)
+	}
+
+	_, client := newCollisionTestDriver(t, mock, spoolManager, "rename", root)
+
+	w, err := client.handleUploadOpen("/uploads/report.pdf")
+	if err != nil {
+		t.Fatalf("handleUploadOpen failed: %v", err)
+	}
+	defer spoolManager.GetUploadManager().AbortUpload(w.upload)
+
+	if w.spoolUpload.path != wantTarget {
+		t.Errorf("expected target %q (object does not exist in WebDAV), got %q", wantTarget, w.spoolUpload.path)
+	}
+}
+
+// TestCommitToWebDAVHonorsCollisionPolicy verifies that the final PUT only
+// overwrites for the explicit overwrite policy; for rename/reject it sends
+// If-None-Match so an object that appeared after path resolution fails with a
+// conflict instead of silently destroying the existing object (QLT-001).
+func TestCommitToWebDAVHonorsCollisionPolicy(t *testing.T) {
+	spoolDir := t.TempDir()
+	spoolManager, err := spool.NewManager(spoolDir, 1024*1024)
+	if err != nil {
+		t.Fatalf("failed to create spool manager: %v", err)
+	}
+
+	content := []byte("new scan data")
+	spooledFile := filepath.Join(spoolDir, "spooled-upload")
+	if err := os.WriteFile(spooledFile, content, 0o644); err != nil {
+		t.Fatalf("failed to write spooled file: %v", err)
+	}
+
+	setup := func(t *testing.T, policy string, existing map[string][]byte) (*mockWebDAVServer, *uploadWriter, spool.FileRef) {
+		mock := newMockWebDAVServer(t, existing)
+		_, client := newCollisionTestDriver(t, mock, spoolManager, policy, "/")
+		client.webdavClient = webdav.NewClientWithCredentials(mock.URL+"/webdav", "test-printer", "token")
+		w := &uploadWriter{
+			clientDriver: client,
+			uploadID:     "upload-1",
+			spoolUpload:  &spoolUpload{path: "/uploads/report.pdf"},
+		}
+		fileRef := spool.FileRef{
+			UserID:     "test-printer",
+			FileID:     "file-1",
+			Filename:   "report.pdf",
+			Size:       int64(len(content)),
+			Path:       spooledFile,
+			TargetPath: "/uploads/report.pdf",
+		}
+		return mock, w, fileRef
+	}
+
+	t.Run("rename policy sends If-None-Match", func(t *testing.T) {
+		mock, w, fileRef := setup(t, "rename", nil)
+		if err := w.commitToWebDAV(fileRef); err != nil {
+			t.Fatalf("commit failed: %v", err)
+		}
+		if got := mock.lastPUTHeader().Get("If-None-Match"); got != "*" {
+			t.Errorf("expected If-None-Match: * for rename policy, got %q", got)
+		}
+	})
+
+	t.Run("rename policy conflict fails instead of overwriting", func(t *testing.T) {
+		mock, w, fileRef := setup(t, "rename", map[string][]byte{"/uploads/report.pdf": []byte("previous scan")})
+		err := w.commitToWebDAV(fileRef)
+		if err == nil {
+			t.Fatal("expected commit to fail when object appeared after path resolution")
+		}
+		if got := mock.fileContent("/uploads/report.pdf"); got != "previous scan" {
+			t.Errorf("existing object was overwritten: content = %q", got)
+		}
+	})
+
+	t.Run("overwrite policy replaces without If-None-Match", func(t *testing.T) {
+		mock, w, fileRef := setup(t, "overwrite", map[string][]byte{"/uploads/report.pdf": []byte("previous scan")})
+		if err := w.commitToWebDAV(fileRef); err != nil {
+			t.Fatalf("commit failed: %v", err)
+		}
+		if got := mock.lastPUTHeader().Get("If-None-Match"); got != "" {
+			t.Errorf("expected no If-None-Match for overwrite policy, got %q", got)
+		}
+		if got := mock.fileContent("/uploads/report.pdf"); got != string(content) {
+			t.Errorf("expected object to be replaced, content = %q", got)
+		}
+	})
 }
