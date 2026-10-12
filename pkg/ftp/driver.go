@@ -436,8 +436,10 @@ func (d *BridgeDriver) AuthUser(cc ftpserver.ClientContext, user, password strin
 		d.authAttemptTracker.RecordAuthAttempt(clientIP, true)
 	}
 
-	// Increment connection counter
-	atomic.AddInt64(&d.activeConnections, 1)
+	// The connection is already counted by ClientConnected, which follows
+	// the socket lifecycle. Counting it again here would leak +1 per
+	// authenticated session and eventually lock out all logins once the
+	// counter reaches max_connections (SEC-004).
 
 	d.obs.Log("info", fmt.Sprintf("FTP authentication successful for user %s (oCIS: %s)", user, account.OCIS.Username))
 
