@@ -252,6 +252,11 @@ type BridgeDriver struct {
 	// Account management
 	accounts map[string]*config.AccountConfig
 
+	// Drive resolution cache (PERF-002): repeated logins for the same
+	// account reuse the resolved drive instead of calling the Graph API.
+	driveCacheMu sync.Mutex
+	driveCache   map[string]driveCacheEntry
+
 	// Active client sessions, keyed by connection ID. Used to cancel the
 	// per-session context when the client disconnects.
 	clients map[uint32]*bridgeClientDriver
@@ -329,6 +334,7 @@ func NewBridgeDriver(
 		graphClient:   graphClient,
 		transferManagers:   transferMgrs,
 		accounts:      accounts,
+		driveCache:    make(map[string]driveCacheEntry),
 		clients:       make(map[uint32]*bridgeClientDriver),
 		maxConnections: cfg.Server.MaxConnections,
 		connectionTracker: connTracker,
@@ -1147,11 +1153,64 @@ func (d *BridgeDriver) authenticateUser(user, password string) (*config.AccountC
 	return account, nil
 }
 
-// resolveDriveForAccount resolves the oCIS drive for an account
+// driveResolutionCacheTTL bounds how long a resolved drive is reused before
+// it is re-resolved against the Graph API. Drive targets change rarely, but
+// the TTL keeps deletions and renames from going unnoticed (PERF-002).
+var driveResolutionCacheTTL = 5 * time.Minute
+
+// driveCacheEntry is a cached per-account drive resolution.
+type driveCacheEntry struct {
+	drive     graph.Drive
+	expiresAt time.Time
+}
+
+// resolveDriveForAccount resolves the oCIS drive for an account. Successful
+// resolutions are cached per account for driveResolutionCacheTTL so repeated
+// logins do not each hit the Graph API. Failures are never cached — a 401
+// (revoked app token) or 404 (deleted drive) re-resolves on the next login
+// (PERF-002).
 func (d *BridgeDriver) resolveDriveForAccount(account *config.AccountConfig) (graph.Drive, error) {
-	// Check if we already have a cached resolution
-	// In a real implementation, we would cache this or resolve on-demand
-	
+	if drive, ok := d.cachedDriveResolution(account.Username); ok {
+		return drive, nil
+	}
+
+	drive, err := d.resolveDriveFresh(account)
+	if err != nil {
+		return graph.Drive{}, err
+	}
+
+	d.storeDriveResolution(account.Username, drive)
+	return drive, nil
+}
+
+// cachedDriveResolution returns the cached resolution for the account if one
+// exists and has not expired.
+func (d *BridgeDriver) cachedDriveResolution(username string) (graph.Drive, bool) {
+	d.driveCacheMu.Lock()
+	defer d.driveCacheMu.Unlock()
+	entry, ok := d.driveCache[username]
+	if !ok || time.Now().After(entry.expiresAt) {
+		return graph.Drive{}, false
+	}
+	return entry.drive, true
+}
+
+// storeDriveResolution caches a successful resolution for the account.
+func (d *BridgeDriver) storeDriveResolution(username string, drive graph.Drive) {
+	d.driveCacheMu.Lock()
+	defer d.driveCacheMu.Unlock()
+	if d.driveCache == nil {
+		d.driveCache = make(map[string]driveCacheEntry)
+	}
+	d.driveCache[username] = driveCacheEntry{
+		drive:     drive,
+		expiresAt: time.Now().Add(driveResolutionCacheTTL),
+	}
+}
+
+// resolveDriveFresh resolves the account's drive against the Graph API
+// without consulting the cache.
+func (d *BridgeDriver) resolveDriveFresh(account *config.AccountConfig) (graph.Drive, error) {
 	// Use the account's oCIS credentials
 	client := graph.NewClientWithCredentials(d.cfg.OCIS.GraphURL, account.OCIS.Username, account.AppToken)
 	
