@@ -53,6 +53,12 @@ data:
     
     http:
       address: ":9200"
+      # Bridge-level auth is disabled: kubelet httpGet probes cannot send
+      # credentials, and this Service is ClusterIP (cluster-internal only).
+      # Restrict access with a NetworkPolicy; front /metrics with an
+      # authenticating ingress if it must leave the cluster.
+      auth:
+        enabled: false
     
     ocis:
       url: "https://ocis.ocis.svc.cluster.local:9200"
