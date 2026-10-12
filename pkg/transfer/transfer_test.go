@@ -1066,6 +1066,9 @@ type fakeWebDAVClient struct {
 	existing    map[string]bool
 	checked     []string
 	createdDirs []string
+	// checkErr, when set, is returned by every CheckPathExistence call to
+	// simulate an unreachable or erroring WebDAV backend.
+	checkErr error
 }
 
 func newFakeWebDAVClient(existing ...string) *fakeWebDAVClient {
@@ -1102,6 +1105,9 @@ func (f *fakeWebDAVClient) CheckPathExistence(_ context.Context, path string) (b
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.checked = append(f.checked, path)
+	if f.checkErr != nil {
+		return false, f.checkErr
+	}
 	return f.existing[path], nil
 }
 
@@ -1127,6 +1133,12 @@ func (f *fakeWebDAVClient) exists(path string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.existing[path]
+}
+
+func (f *fakeWebDAVClient) createdDirsSnapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.createdDirs...)
 }
 
 // TestResolveCollisionUsesWebDAVExistence verifies that collision resolution
@@ -1219,4 +1231,73 @@ func TestCollisionPoliciesFailClosedWithoutWebDAVClient(t *testing.T) {
 	if _, err := tm.CheckCollision("/uploads/report.pdf"); err == nil {
 		t.Error("expected CheckCollision to fail without a WebDAV client")
 	}
+}
+
+// TestEnsureParentDirectories verifies that parent directories are actually
+// created in oCIS via MKCOL (QLT-002): oCIS follows RFC 4918 and answers a PUT
+// with a missing parent collection with 409 Conflict — it never auto-creates
+// parents, so the bridge must issue MKCOL for every missing level.
+func TestEnsureParentDirectories(t *testing.T) {
+	t.Run("creates every missing level in order", func(t *testing.T) {
+		fake := newFakeWebDAVClient()
+		tm := NewTransferManagerWithWebDAV(context.Background(), fake)
+
+		if err := tm.EnsureParentDirectories("/uploads/scans/2026/file.pdf"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		want := []string{"/uploads", "/uploads/scans", "/uploads/scans/2026"}
+		got := fake.createdDirsSnapshot()
+		if len(got) != len(want) {
+			t.Fatalf("expected MKCOL for %v, got %v", want, got)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("expected MKCOL order %v, got %v", want, got)
+			}
+		}
+	})
+
+	t.Run("no MKCOL when the parent already exists", func(t *testing.T) {
+		fake := newFakeWebDAVClient("/uploads/scans")
+		tm := NewTransferManagerWithWebDAV(context.Background(), fake)
+
+		if err := tm.EnsureParentDirectories("/uploads/scans/file.pdf"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := fake.createdDirsSnapshot(); len(got) != 0 {
+			t.Errorf("expected no MKCOL for existing parent, got %v", got)
+		}
+	})
+
+	t.Run("falls back to recursive creation when the existence check fails", func(t *testing.T) {
+		fake := newFakeWebDAVClient()
+		fake.checkErr = fmt.Errorf("HEAD request failed")
+		tm := NewTransferManagerWithWebDAV(context.Background(), fake)
+
+		if err := tm.EnsureParentDirectories("/uploads/scans/2026/file.pdf"); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Even without a working existence check, every missing level must be
+		// created — a single-level MKCOL would 409 against real oCIS.
+		want := []string{"/uploads", "/uploads/scans", "/uploads/scans/2026"}
+		got := fake.createdDirsSnapshot()
+		if len(got) != len(want) {
+			t.Fatalf("expected MKCOL for %v, got %v", want, got)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("expected MKCOL order %v, got %v", want, got)
+			}
+		}
+	})
+
+	t.Run("fails closed without a WebDAV client", func(t *testing.T) {
+		tm := NewTransferManager()
+
+		if err := tm.EnsureParentDirectories("/uploads/scans/file.pdf"); err == nil {
+			t.Error("expected error without a WebDAV client")
+		}
+	})
 }
