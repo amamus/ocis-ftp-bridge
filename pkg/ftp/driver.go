@@ -1187,6 +1187,7 @@ func (w *uploadWriter) commitToWebDAV(fileRef spool.FileRef) error {
 // throwaway secret). It is verified when the username does not exist so an
 // unknown user pays the same Argon2id cost as a known one and response
 // timing does not reveal whether the username is valid (SEC-011, CWE-204).
+// #nosec G101 -- not a credential: hash of a random throwaway secret, used only to equalize auth timing
 var dummyPasswordHash = "$argon2id$v=19$m=65536,t=3,p=4$V2HEceVvtTsIpU6Wij92vw$n/WMbvGMAALmNM9yA18u19MLN7rn16akha2yqhAWQOo"
 
 // authenticateUser authenticates an FTP user against configured accounts
