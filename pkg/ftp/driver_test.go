@@ -376,7 +376,6 @@ func TestHandleUploadOpenPathMapping(t *testing.T) {
 		bridgeDriver: d,
 		account:      &cfg.Accounts[0],
 		user:         "test-printer",
-		currentDir:   "/",
 		spoolUploads: make(map[string]*spoolUpload),
 		context:      ctx,
 		cancel:       cancel,
@@ -558,7 +557,6 @@ func newCollisionTestDriver(t *testing.T, mock *mockWebDAVServer, spoolManager s
 		bridgeDriver: d,
 		account:      &cfg.Accounts[0],
 		user:         "test-printer",
-		currentDir:   "/",
 		spoolUploads: make(map[string]*spoolUpload),
 		webdavClient: webdav.NewClientWithCredentials(mock.URL+"/webdav", "test-printer", "token"),
 		context:      ctx,
@@ -1286,7 +1284,6 @@ func TestUploadFileStatReportsBytesWritten(t *testing.T) {
 		bridgeDriver: d,
 		account:      &cfg.Accounts[0],
 		user:         "test-printer",
-		currentDir:   "/",
 		spoolUploads: make(map[string]*spoolUpload),
 		context:      ctx,
 		cancel:       cancel,
@@ -1312,4 +1309,80 @@ func TestUploadFileStatReportsBytesWritten(t *testing.T) {
 	if info.Size() != int64(len(payload)) {
 		t.Errorf("Stat size = %d, want %d (uploadFile.pos must track writes, QLT-008)", info.Size(), len(payload))
 	}
+}
+
+// TestDummyPasswordHashIsValid pins the SEC-011 timing equalizer: the dummy
+// hash used for unknown users must be a valid Argon2id PHC string so that
+// verification really runs (keeping timing indistinguishable from a wrong
+// password for a known user), and it must not match any real password.
+func TestDummyPasswordHashIsValid(t *testing.T) {
+	match, err := config.VerifyPassword(dummyPasswordHash, "any-password")
+	if err != nil {
+		t.Fatalf("dummyPasswordHash is not a valid Argon2id hash: %v (SEC-011)", err)
+	}
+	if match {
+		t.Error("dummyPasswordHash unexpectedly matches a password (SEC-011)")
+	}
+}
+
+// TestTrackerSweepEvictsExpiredEntries verifies that the periodic janitor
+// sweep evicts stale tracker entries (SEC-012): zero-count connection
+// entries, auth-attempt entries whose window expired, and auth-attempt
+// entries whose lockout expired, while live entries are kept.
+func TestTrackerSweepEvictsExpiredEntries(t *testing.T) {
+	t.Run("connection tracker", func(t *testing.T) {
+		ct := newConnectionTracker(10, 100)
+		ct.mu.Lock()
+		ct.ipConnections["192.0.2.10"] = 0 // stale zero-count entry
+		ct.ipConnections["192.0.2.11"] = 2 // live entry
+		ct.mu.Unlock()
+
+		ct.sweep()
+
+		ct.mu.Lock()
+		defer ct.mu.Unlock()
+		if _, exists := ct.ipConnections["192.0.2.10"]; exists {
+			t.Error("sweep kept a zero-count connection entry (SEC-012)")
+		}
+		if count, exists := ct.ipConnections["192.0.2.11"]; !exists || count != 2 {
+			t.Errorf("sweep evicted a live connection entry (got %d, %v), want 2, true", count, exists)
+		}
+	})
+
+	t.Run("auth attempt tracker", func(t *testing.T) {
+		at := newAuthAttemptTracker(5, time.Minute, time.Minute)
+		at.mu.Lock()
+		at.ipAttempts["192.0.2.20"] = &authAttemptInfo{ // window expired
+			count:       1,
+			firstFail:   time.Now().Add(-2 * time.Hour),
+			lastAttempt: time.Now().Add(-2 * time.Hour),
+		}
+		at.ipAttempts["192.0.2.21"] = &authAttemptInfo{ // lockout expired
+			count:       5,
+			firstFail:   time.Now().Add(-2 * time.Hour),
+			lastAttempt: time.Now().Add(-time.Hour),
+			lockedOut:   true,
+			lockoutEnd:  time.Now().Add(-time.Hour),
+		}
+		at.ipAttempts["192.0.2.22"] = &authAttemptInfo{ // fresh entry
+			count:       1,
+			firstFail:   time.Now(),
+			lastAttempt: time.Now(),
+		}
+		at.mu.Unlock()
+
+		at.sweep()
+
+		at.mu.Lock()
+		defer at.mu.Unlock()
+		if _, exists := at.ipAttempts["192.0.2.20"]; exists {
+			t.Error("sweep kept an entry whose attempt window expired (SEC-012)")
+		}
+		if _, exists := at.ipAttempts["192.0.2.21"]; exists {
+			t.Error("sweep kept an entry whose lockout expired (SEC-012)")
+		}
+		if _, exists := at.ipAttempts["192.0.2.22"]; !exists {
+			t.Error("sweep evicted a fresh auth-attempt entry (SEC-012)")
+		}
+	})
 }

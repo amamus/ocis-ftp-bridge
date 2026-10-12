@@ -122,10 +122,34 @@ func (ct *ConnectionTracker) ReleaseConnection(ip string) {
 	defer ct.mu.Unlock()
 	
 	if count, exists := ct.ipConnections[ip]; exists && count > 0 {
-		ct.ipConnections[ip] = count - 1
+		count--
+		if count == 0 {
+			// Evict the entry so every distinct source IP does not leave a
+			// permanent zero-count entry (SEC-012, CWE-401).
+			delete(ct.ipConnections, ip)
+		} else {
+			ct.ipConnections[ip] = count
+		}
 	}
 	if ct.globalCount > 0 {
 		ct.globalCount--
+	}
+}
+
+// sweep evicts zero-count connection entries (defensive; ReleaseConnection
+// already deletes them) so the tracking map stays bounded (SEC-012).
+func (ct *ConnectionTracker) sweep() {
+	if ct == nil {
+		return
+	}
+
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+
+	for ip, count := range ct.ipConnections {
+		if count <= 0 {
+			delete(ct.ipConnections, ip)
+		}
 	}
 }
 
@@ -184,20 +208,20 @@ func (at *AuthAttemptTracker) RecordAuthAttempt(ip string, success bool) bool {
 	defer at.mu.Unlock()
 	
 	info, exists := at.ipAttempts[ip]
+	if success {
+		// Drop the tracking entry entirely so every source IP that ever
+		// authenticated does not leave a permanent entry (SEC-012, CWE-401).
+		if exists {
+			delete(at.ipAttempts, ip)
+		}
+		return true
+	}
 	if !exists {
 		info = &authAttemptInfo{
 			count:       0,
 			lastAttempt: time.Now(),
 		}
 		at.ipAttempts[ip] = info
-	}
-	
-	// If this is a successful attempt, reset the failure tracking
-	if success {
-		info.count = 0 // Reset counter on success
-		info.firstFail = time.Time{} // Reset failure tracking
-		info.lastAttempt = time.Now()
-		return true
 	}
 	
 	// For failed attempts
@@ -225,6 +249,31 @@ func (at *AuthAttemptTracker) RecordAuthAttempt(ip string, success bool) bool {
 	}
 	
 	return true
+}
+
+// sweep evicts auth-attempt entries whose tracking window or lockout has
+// expired, so source IPs that never return do not leave permanent entries
+// (SEC-012, CWE-401).
+func (at *AuthAttemptTracker) sweep() {
+	if at == nil {
+		return
+	}
+
+	at.mu.Lock()
+	defer at.mu.Unlock()
+
+	now := time.Now()
+	for ip, info := range at.ipAttempts {
+		if info.lockedOut {
+			if now.After(info.lockoutEnd) {
+				delete(at.ipAttempts, ip)
+			}
+			continue
+		}
+		if !info.firstFail.IsZero() && now.Sub(info.firstFail) > at.window {
+			delete(at.ipAttempts, ip)
+		}
+	}
 }
 
 // BridgeDriver implements MainDriver interface
@@ -267,9 +316,17 @@ type BridgeDriver struct {
 	// Sync primitives
 	mu sync.RWMutex
 
-	// Shutdown
+	// Lifecycle: ctx is the driver lifecycle context. Session contexts and
+	// the per-account transfer managers derive from it, and Shutdown cancels
+	// it so in-flight uploads abort on SIGTERM instead of surviving until
+	// the client disconnects (QLT-011). The tracker janitor stops with it.
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	// Shutdown: shutdownChan is closed exactly once (shutdownOnce) and is
+	// the single synchronization point for shutdown state (QLT-008).
 	shutdownChan chan struct{}
-	shutdown     bool
+	shutdownOnce sync.Once
 }
 
 // NewBridgeDriver creates a new bridge FTP server driver.
@@ -280,6 +337,11 @@ func NewBridgeDriver(
 	obs observability.Client,
 	spoolManager spool.Manager,
 ) *BridgeDriver {
+	// The driver lifecycle context: session contexts and transfer managers
+	// derive from it, and Shutdown cancels it so in-flight uploads abort on
+	// SIGTERM instead of surviving until the client disconnects (QLT-011).
+	ctx, cancel := context.WithCancel(context.Background())
+
 	// Extract accounts for faster lookup
 	accounts := make(map[string]*config.AccountConfig)
 	for i := range cfg.Accounts {
@@ -298,7 +360,7 @@ func NewBridgeDriver(
 			account.OCIS.Username,
 			account.AppToken,
 		)
-		transferMgr := transfer.NewTransferManagerWithWebDAV(context.Background(), webdavClient)
+		transferMgr := transfer.NewTransferManagerWithWebDAV(ctx, webdavClient)
 		transferMgr.AddTarget(account.Username, transfer.TargetConfig{
 			DriveID:          account.Target.DriveID,
 			Drive:           account.Target.Drive,
@@ -325,7 +387,7 @@ func NewBridgeDriver(
 		)
 	}
 
-	return &BridgeDriver{
+	d := &BridgeDriver{
 		cfg:           cfg,
 		obs:          obs,
 		spoolManager:  spoolManager,
@@ -336,8 +398,39 @@ func NewBridgeDriver(
 		maxConnections: cfg.Server.MaxConnections,
 		connectionTracker: connTracker,
 		authAttemptTracker: authTracker,
+		ctx:           ctx,
+		cancel:        cancel,
 		shutdownChan:  make(chan struct{}),
 	}
+	d.startTrackerJanitor()
+	return d
+}
+
+// trackerSweepInterval is how often the rate-limiting trackers are swept
+// for expired entries (SEC-012).
+const trackerSweepInterval = time.Minute
+
+// startTrackerJanitor periodically sweeps the rate-limiting trackers so
+// entries for source IPs that never return are evicted (SEC-012). It stops
+// when the driver lifecycle context is cancelled.
+func (d *BridgeDriver) startTrackerJanitor() {
+	if d.connectionTracker == nil && d.authAttemptTracker == nil {
+		return
+	}
+
+	go func() {
+		ticker := time.NewTicker(trackerSweepInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-d.ctx.Done():
+				return
+			case <-ticker.C:
+				d.connectionTracker.sweep()
+				d.authAttemptTracker.sweep()
+			}
+		}
+	}()
 }
 
 // transferManagerFor returns the transfer manager for the given account, or
@@ -417,17 +510,17 @@ func (d *BridgeDriver) AuthUser(cc ftpserver.ClientContext, user, password strin
 		account:        account,
 		resolvedDrive:  &resolvedDrive,
 		user:           user,
-		currentDir:     "/",
 		webdavClient:   webdavClient,
 		spoolUploads:   make(map[string]*spoolUpload),
 		uploadCounter:  0,
-		lastAccess:     time.Now(),
 		context:        context.Background(),
 		cancel:         func() {},
 	}
 
-	// Create a real context for this session
-	clientDriver.context, clientDriver.cancel = context.WithCancel(context.Background())
+	// Create the session context derived from the driver lifecycle so the
+	// session is cancelled when the client disconnects or the driver shuts
+	// down (QLT-011)
+	clientDriver.context, clientDriver.cancel = context.WithCancel(d.ctx)
 
 	// Track the session so its context is cancelled when the client disconnects
 	d.mu.Lock()
@@ -566,16 +659,14 @@ func (d *BridgeDriver) ClientDisconnected(cc ftpserver.ClientContext) {
 	d.obs.Log("info", fmt.Sprintf("FTP client disconnected (ID: %d, addr: %s)", cc.ID(), cc.RemoteAddr().String()))
 }
 
-// Shutdown initiates server shutdown.
+// Shutdown initiates server shutdown: it cancels the driver lifecycle
+// context (aborting in-flight uploads, QLT-011) and signals shutdown. It is
+// safe to call multiple times.
 func (d *BridgeDriver) Shutdown() {
-	select {
-	case <-d.shutdownChan:
-		// Already shutting down
-		return
-	default:
+	d.shutdownOnce.Do(func() {
 		close(d.shutdownChan)
-		d.shutdown = true
-	}
+		d.cancel()
+	})
 
 	d.obs.Log("info", "FTP server shutting down")
 }
@@ -586,7 +677,7 @@ func (d *BridgeDriver) IsShuttingDown() bool {
 	case <-d.shutdownChan:
 		return true
 	default:
-		return d.shutdown
+		return false
 	}
 }
 
@@ -601,7 +692,6 @@ type bridgeClientDriver struct {
 	account      *config.AccountConfig
 	resolvedDrive *graph.Drive
 	user         string
-	currentDir   string
 	webdavClient webdav.Client
 
 	// Upload tracking
@@ -610,9 +700,8 @@ type bridgeClientDriver struct {
 	mu             sync.Mutex
 
 	// Session management
-	lastAccess time.Time
-	context    context.Context
-	cancel     context.CancelFunc
+	context context.Context
+	cancel  context.CancelFunc
 }
 
 // spoolUpload tracks an active upload operation
@@ -621,8 +710,7 @@ type spoolUpload struct {
 	fileRef   spool.FileRef
 	startTime time.Time
 	lastChunk time.Time
-	bytesWritten int64
-	path       string
+	path      string
 }
 
 // Ensure bridgeClientDriver implements required interfaces
@@ -648,7 +736,9 @@ func (f *uploadFile) ReadAt(p []byte, off int64) (n int, err error) {
 
 // Write writes data to the file
 func (f *uploadFile) Write(p []byte) (n int, err error) {
-	return f.writer.Write(p)
+	n, err = f.writer.Write(p)
+	f.pos += int64(n)
+	return n, err
 }
 
 // WriteAt writes data to the file at offset (not supported for upload files)
@@ -885,10 +975,9 @@ func (c *bridgeClientDriver) handleUploadOpen(path string) (*uploadWriter, error
 	// Create an upload writer that streams to spool
 	writer := &uploadWriter{
 		clientDriver: c,
-		uploadID:    uploadID,
-		upload:      upload,
-		spoolUpload: spoolUpload,
-		bytesWritten: 0,
+		uploadID:     uploadID,
+		upload:       upload,
+		spoolUpload:  spoolUpload,
 	}
 
 	c.bridgeDriver.obs.Log("info", fmt.Sprintf("Upload started for user %s, upload %s, target %s, filename %s",
@@ -906,7 +995,6 @@ type uploadWriter struct {
 	uploadID     string
 	upload       *spool.Upload
 	spoolUpload  *spoolUpload
-	bytesWritten int64
 	// writeErr is the first chunk write error, if any. Close aborts the
 	// upload instead of committing a partial file when it is set.
 	writeErr error
@@ -947,9 +1035,6 @@ func (w *uploadWriter) Write(p []byte) (n int, err error) {
 		w.clientDriver.bridgeDriver.obs.Log("error", fmt.Sprintf("Upload write failed for user %s, upload %s: %v", w.clientDriver.user, w.uploadID, err))
 		return n, err
 	}
-
-	w.bytesWritten += int64(n)
-	w.spoolUpload.bytesWritten += int64(n)
 
 	return n, nil
 }
@@ -1098,10 +1183,21 @@ func (w *uploadWriter) commitToWebDAV(fileRef spool.FileRef) error {
 // Authentication and Account Resolution
 // =========================================================================
 
+// dummyPasswordHash is a valid Argon2id PHC string (the hash of a random
+// throwaway secret). It is verified when the username does not exist so an
+// unknown user pays the same Argon2id cost as a known one and response
+// timing does not reveal whether the username is valid (SEC-011, CWE-204).
+var dummyPasswordHash = "$argon2id$v=19$m=65536,t=3,p=4$V2HEceVvtTsIpU6Wij92vw$n/WMbvGMAALmNM9yA18u19MLN7rn16akha2yqhAWQOo"
+
 // authenticateUser authenticates an FTP user against configured accounts
 func (d *BridgeDriver) authenticateUser(user, password string) (*config.AccountConfig, error) {
 	account, exists := d.accounts[user]
 	if !exists {
+		// Burn the same Argon2id work as for a known user so response timing
+		// does not reveal whether the username exists (SEC-011, CWE-204).
+		if _, err := config.VerifyPassword(dummyPasswordHash, password); err != nil {
+			return nil, ErrInvalidCredentials
+		}
 		return nil, ErrUserNotFound
 	}
 

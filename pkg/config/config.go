@@ -447,6 +447,10 @@ func (c *Config) validateWithEnv(lookupEnv func(string) (string, bool)) error {
 	exampleHashes := []string{
 			"$argon2id$v=19$m=65536,t=3,p=1$MDEyMzQ1Njc4OWFiY2RlZg$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 			"$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJC1OeqncgJ2almHUfLnhtRTVrjD8zGQ",
+			// Hashes shipped in config.yaml.example (QLT-009): the example
+			// file must not validate cleanly against production rules.
+			"$argon2id$v=19$m=65536,t=3,p=4$jK4n6v8Bw5Fh9Lm3NqPj8H$DWQ3EeT6RfYhMjDfGvXpCnMqLkJiGfDs",
+			"$argon2id$v=19$m=65536,t=3,p=4$kL5n7v9Bw6Fh0Lm4NqPj9H$EWQ4EeT7RfYhNkDfGvXpDnMqLkJkGfDt",
 		}
 		for _, exampleHash := range exampleHashes {
 			if strings.Contains(account.PasswordHash, exampleHash) {

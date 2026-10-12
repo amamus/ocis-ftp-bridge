@@ -435,3 +435,26 @@ func TestNewSpoolInitFailure(t *testing.T) {
 		t.Errorf("New error = %v, want it to mention the spool initialization", err)
 	}
 }
+
+// TestStopFTPSServerShutsDownFTPDriver verifies that stopping the FTP server
+// also shuts down the FTP driver, cancelling its lifecycle context so that
+// in-flight uploads are aborted during service shutdown instead of surviving
+// until the client disconnects (QLT-011).
+func TestStopFTPSServerShutsDownFTPDriver(t *testing.T) {
+	srv, err := New(testConfig(t), noopObs{})
+	if err != nil {
+		t.Fatalf("failed to construct service: %v", err)
+	}
+	svc, ok := srv.(*service)
+	if !ok {
+		t.Fatalf("expected *service, got %T", srv)
+	}
+
+	// Stop returns ErrNotListening because no listener was started in this
+	// test; the driver shutdown must still have happened.
+	_ = svc.stopFTPServer()
+
+	if !svc.ftpDriver.IsShuttingDown() {
+		t.Error("stopFTPServer did not shut down the FTP driver (QLT-011)")
+	}
+}
