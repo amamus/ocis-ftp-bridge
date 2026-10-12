@@ -1386,3 +1386,26 @@ func TestTrackerSweepEvictsExpiredEntries(t *testing.T) {
 		}
 	})
 }
+
+// TestGetSettingsDataConnectionSecurity pins the SEC-005 security property:
+// data connections (active and passive) must require the peer IP to match
+// the control connection's peer IP, and active mode must default to enabled
+// for printer compatibility.
+func TestGetSettingsDataConnectionSecurity(t *testing.T) {
+	d := NewBridgeDriver(config.New(), noopObs{}, nil)
+	defer d.Shutdown()
+
+	settings, err := d.GetSettings()
+	if err != nil {
+		t.Fatalf("GetSettings failed: %v", err)
+	}
+	if settings.ActiveConnectionsCheck != ftpserver.IPMatchRequired {
+		t.Errorf("ActiveConnectionsCheck = %v, want IPMatchRequired (SEC-005)", settings.ActiveConnectionsCheck)
+	}
+	if settings.PasvConnectionsCheck != ftpserver.IPMatchRequired {
+		t.Errorf("PasvConnectionsCheck = %v, want IPMatchRequired (SEC-005)", settings.PasvConnectionsCheck)
+	}
+	if settings.DisableActiveMode {
+		t.Error("DisableActiveMode = true, want false: active mode defaults to enabled for printer compatibility (SEC-005)")
+	}
+}

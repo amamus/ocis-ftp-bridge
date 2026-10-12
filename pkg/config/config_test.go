@@ -589,3 +589,36 @@ func TestExampleConfigHashesAreBlocklisted(t *testing.T) {
 		t.Errorf("Validate error = %v, want it to reject the example password hashes (QLT-009)", err)
 	}
 }
+
+// TestAllowActiveModeConfigKey guards SEC-005: the server.allow_active_mode
+// key must be accepted by the strict configuration loader so active FTP mode
+// is configurable (it defaults to enabled for printer compatibility).
+func TestAllowActiveModeConfigKey(t *testing.T) {
+	env := map[string]string{"OCIS_FTP_RECEPTION_TOKEN": "app-token-secret"}
+
+	t.Run("explicitly disabled", func(t *testing.T) {
+		yamlText := strings.Replace(validYAML(testHash("printer-secret")),
+			"  listen: \":21\"\n",
+			"  listen: \":21\"\n  allow_active_mode: false\n",
+			1)
+		if _, err := loadText(t, yamlText, env); err != nil {
+			t.Fatalf("config with server.allow_active_mode: false failed to load: %v (SEC-005)", err)
+		}
+	})
+
+	t.Run("explicitly enabled", func(t *testing.T) {
+		yamlText := strings.Replace(validYAML(testHash("printer-secret")),
+			"  listen: \":21\"\n",
+			"  listen: \":21\"\n  allow_active_mode: true\n",
+			1)
+		if _, err := loadText(t, yamlText, env); err != nil {
+			t.Fatalf("config with server.allow_active_mode: true failed to load: %v (SEC-005)", err)
+		}
+	})
+
+	t.Run("key absent", func(t *testing.T) {
+		if _, err := loadText(t, validYAML(testHash("printer-secret")), env); err != nil {
+			t.Fatalf("config without allow_active_mode failed to load: %v", err)
+		}
+	})
+}
