@@ -177,11 +177,22 @@ func (c *webdavClient) doUpload(ctx context.Context, fullURL string, reader io.R
 		return fmt.Errorf("failed to create WebDAV upload request: %w", err)
 	}
 
+	// Set ContentLength on the request itself. Go's HTTP transport ignores
+	// the Content-Length header; req.ContentLength must be set explicitly.
+	// Without this, non-seekable readers (e.g. *os.File) produce chunked
+	// transfer encoding, which oCIS rejects with 400. See issue #106.
+	if size == 0 {
+		// For zero-byte uploads, ContentLength=0 with a non-nil Body means
+		// "unknown length" (chunked) in Go. Use http.NoBody to send
+		// Content-Length: 0 with an empty body.
+		req.ContentLength = 0
+		req.Body = http.NoBody
+	} else {
+		req.ContentLength = size
+	}
+
 	// Set headers
 	req.Header.Set("Content-Type", "application/octet-stream")
-	if size > 0 {
-		req.Header.Set("Content-Length", fmt.Sprintf("%d", size))
-	}
 
 	// Set conditional headers for overwrite protection
 	if !overwrite {
