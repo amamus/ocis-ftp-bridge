@@ -123,6 +123,12 @@ type OCISConfig struct {
 	URL       string `yaml:"url" json:"url"`
 	GraphURL  string `yaml:"graph_url,omitempty" json:"graph_url,omitempty"`
 	WebDAVURL string `yaml:"webdav_url,omitempty" json:"webdav_url,omitempty"`
+	// CAFile is an optional path to a PEM-encoded CA certificate file
+	// for verifying the oCIS server's TLS certificate. See issue #113.
+	CAFile string `yaml:"ca_file,omitempty" json:"ca_file,omitempty"`
+	// InsecureSkipVerify disables TLS certificate verification.
+	// WARNING: This is insecure and should only be used for testing. See issue #113.
+	InsecureSkipVerify bool `yaml:"insecure_skip_verify,omitempty" json:"insecure_skip_verify,omitempty"`
 }
 
 type SpoolConfig struct {
@@ -231,9 +237,12 @@ func New() *Config {
 			},
 		},
 		OCIS: OCISConfig{
-			URL:       "http://localhost:9200",
-			GraphURL:  "http://localhost:9200/api/libregraph",
-			WebDAVURL: "http://localhost:9200/webdav",
+			URL: "http://localhost:9200",
+			// GraphURL and WebDAVURL are intentionally left empty here.
+			// They are derived from ocis.url in validateOCIS if not set.
+			// See issue #113.
+			GraphURL:  "",
+			WebDAVURL: "",
 		},
 		Spool: SpoolConfig{
 			Directory:    "/var/tmp/ocis-ftp-bridge-spool",
@@ -535,7 +544,9 @@ func (c *Config) validateOCIS() error {
 		}
 		base := strings.TrimRight(c.OCIS.URL, "/")
 		if c.OCIS.GraphURL == "" {
-			c.OCIS.GraphURL = base + "/api/libregraph"
+			// oCIS serves the Graph API at /graph/v1.0 (not /api/libregraph).
+			// See issue #113.
+			c.OCIS.GraphURL = base + "/graph/v1.0"
 		}
 		if c.OCIS.WebDAVURL == "" {
 			c.OCIS.WebDAVURL = base + "/webdav"

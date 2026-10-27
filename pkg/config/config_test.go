@@ -15,7 +15,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/argon2"
+	"gopkg.in/yaml.v3"
 )
 
 func testHash(password string) string {
@@ -551,4 +554,69 @@ func TestParseArgon2IDDigestLengthLimit(t *testing.T) {
 	if _, err := parseArgon2ID(build(4097)); err == nil {
 		t.Fatal("expected 4097-byte digest to be rejected")
 	}
+}
+
+// TestValidateOCIS_DerivesURLs verifies that when ocis.url is set but
+// graph_url/webdav_url are empty, they are derived from ocis.url with the
+// correct oCIS paths. See issue #113.
+func TestValidateOCIS_DerivesURLs(t *testing.T) {
+	t.Parallel()
+
+	cfg := New()
+	cfg.OCIS.URL = "https://ocis.example.com"
+	cfg.OCIS.GraphURL = ""  // empty: should be derived
+	cfg.OCIS.WebDAVURL = "" // empty: should be derived
+	// Skip other validations by setting minimal required fields
+	cfg.Server.Listen = ":2121"
+	cfg.Server.Passive = PassiveConfig{MinPort: 40000, MaxPort: 50000}
+	cfg.Server.TLS.Enabled = false
+	cfg.Spool.Directory = "/tmp/spool"
+	cfg.Spool.MaxTotalSize = ByteSize(1024 * 1024)
+	cfg.Accounts = nil // no accounts needed for OCIS validation test
+
+	err := cfg.validateOCIS()
+	require.NoError(t, err)
+
+	assert.Equal(t, "https://ocis.example.com/graph/v1.0", cfg.OCIS.GraphURL,
+		"graph_url should be derived as <url>/graph/v1.0")
+	assert.Equal(t, "https://ocis.example.com/webdav", cfg.OCIS.WebDAVURL,
+		"webdav_url should be derived as <url>/webdav")
+}
+
+// TestValidateOCIS_PreservesExplicitURLs verifies that explicitly set
+// graph_url/webdav_url are not overwritten. See issue #113.
+func TestValidateOCIS_PreservesExplicitURLs(t *testing.T) {
+	t.Parallel()
+
+	cfg := New()
+	cfg.OCIS.URL = "https://ocis.example.com"
+	cfg.OCIS.GraphURL = "https://custom.example.com/graph/v1.0"
+	cfg.OCIS.WebDAVURL = "https://custom.example.com/dav/spaces/abc"
+
+	err := cfg.validateOCIS()
+	require.NoError(t, err)
+
+	assert.Equal(t, "https://custom.example.com/graph/v1.0", cfg.OCIS.GraphURL,
+		"explicit graph_url should be preserved")
+	assert.Equal(t, "https://custom.example.com/dav/spaces/abc", cfg.OCIS.WebDAVURL,
+		"explicit webdav_url should be preserved")
+}
+
+// TestOCISConfig_CAFileAndInsecureSkipVerify verifies that the new
+// CA file and insecure skip verify options are parsed from YAML. See issue #113.
+func TestOCISConfig_CAFileAndInsecureSkipVerify(t *testing.T) {
+	t.Parallel()
+
+	yamlData := `
+ocis:
+  url: "https://ocis.example.com"
+  ca_file: "/etc/ssl/certs/custom-ca.pem"
+  insecure_skip_verify: true
+`
+	var cfg Config
+	err := yaml.Unmarshal([]byte(yamlData), &cfg)
+	require.NoError(t, err)
+
+	assert.Equal(t, "/etc/ssl/certs/custom-ca.pem", cfg.OCIS.CAFile)
+	assert.True(t, cfg.OCIS.InsecureSkipVerify)
 }
