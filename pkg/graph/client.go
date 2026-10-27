@@ -47,8 +47,10 @@ func NewLibreGraphClientWithHTTP(baseURL, username, token string, httpClient *ht
 		}
 	}
 
-	// Ensure baseURL ends with exactly one slash for proper joining
-	baseURL = strings.TrimRight(baseURL, "/") + "/"
+	// Trim trailing slashes from baseURL. The libregraph SDK request paths
+	// already start with "/", so a trailing slash would produce double-slash
+	// paths (e.g. /graph/v1.0//drives/...). See issue #105.
+	baseURL = strings.TrimRight(baseURL, "/")
 
 	// Parse and validate the base URL
 	parsedURL, err := url.Parse(baseURL)

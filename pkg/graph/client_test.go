@@ -339,3 +339,34 @@ func TestLibreGraphClient_NotFound(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, ErrDriveNotFound, err)
 }
+
+// TestLibreGraphClient_NoDoubleSlashInRequestPath verifies that the Graph client
+// does not produce double-slash paths (e.g. /graph/v1.0//drives/...).
+// The libregraph SDK request paths already start with "/", so the base URL
+// must NOT end with a trailing slash. See issue #105.
+func TestLibreGraphClient_NoDoubleSlashInRequestPath(t *testing.T) {
+	t.Parallel()
+
+	var capturedPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		// Return a valid drive JSON response
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"test-drive-id","name":"Test Drive"}`))
+	}))
+	defer server.Close()
+
+	// Use a base URL that includes a path prefix (like real oCIS: /graph/v1.0)
+	client := NewLibreGraphClient(server.URL+"/graph/v1.0", "testuser", "testtoken")
+
+	_, err := client.ResolveDrive("test-drive-id")
+	require.NoError(t, err)
+
+	// The request path must not contain "//" (double slash)
+	assert.NotContains(t, capturedPath, "//",
+		"request path must not contain double slashes, got: %s", capturedPath)
+	// The path should start with a single slash and contain the drives segment
+	assert.Contains(t, capturedPath, "/drives/test-drive-id",
+		"request path should contain /drives/test-drive-id, got: %s", capturedPath)
+}
