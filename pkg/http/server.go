@@ -50,7 +50,15 @@ type OperationsServer struct {
 	webdavURL            string
 	spoolDirectory       string
 	checkTimeout         time.Duration
-	
+
+	// Cached health check results: /readyz serves these for up to
+	// healthCheckCacheTTL instead of running outbound checks per request
+	// (SEC-010).
+	healthMu       sync.Mutex
+	healthCachedAt time.Time
+	healthChecks   map[string]string
+	healthFailed   []string
+
 	// HTTP client for connectivity checks
 	httpClient *http.Client
 
@@ -269,7 +277,28 @@ func (s *OperationsServer) performHealthChecks() (map[string]string, []string) {
 	return checks, failedChecks
 }
 
-func NewOperationsServer(address string, healthConfig HealthCheckConfig) *OperationsServer {
+// healthCheckCacheTTL is how long /readyz serves cached health check results
+// before running a fresh set of outbound checks (SEC-010).
+const healthCheckCacheTTL = 5 * time.Second
+
+// cachedHealthChecks returns the most recent health check results, running a
+// fresh set of outbound checks at most once per healthCheckCacheTTL. Probe
+// hammering must not amplify into oCIS/WebDAV traffic (SEC-010).
+func (s *OperationsServer) cachedHealthChecks() (map[string]string, []string) {
+	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
+	if time.Since(s.healthCachedAt) < healthCheckCacheTTL {
+		return s.healthChecks, s.healthFailed
+	}
+	checks, failed := s.performHealthChecks()
+	s.healthChecks, s.healthFailed, s.healthCachedAt = checks, failed, time.Now()
+	return checks, failed
+}
+
+// NewOperationsServer creates the operations HTTP server. auth protects the
+// /readyz and /metrics endpoints; /healthz (liveness, consumed by docker/k8s
+// probes) stays unauthenticated by design.
+func NewOperationsServer(address string, auth AuthConfig, healthConfig HealthCheckConfig) *OperationsServer {
 	// Create custom registry for our metrics
 	registry := prometheus.NewRegistry()
 
@@ -369,6 +398,53 @@ func NewOperationsServer(address string, healthConfig HealthCheckConfig) *Operat
 		[]string{"check"},
 	)
 
+	// Create spool monitoring metrics (QLT-003: the spool monitor publishes
+	// these; without them the monitor's updates would be silently dropped)
+	spoolSizeBytes := prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "ocis_ftp",
+			Subsystem: "spool",
+			Name:      "size_bytes",
+			Help:      "Current spool size in bytes",
+		},
+	)
+
+	spoolFileCount := prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "ocis_ftp",
+			Subsystem: "spool",
+			Name:      "file_count",
+			Help:      "Current number of files in the spool",
+		},
+	)
+
+	spoolCapacityBytes := prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "ocis_ftp",
+			Subsystem: "spool",
+			Name:      "capacity_bytes",
+			Help:      "Configured spool capacity in bytes",
+		},
+	)
+
+	spoolUsagePercent := prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "ocis_ftp",
+			Subsystem: "spool",
+			Name:      "usage_percent",
+			Help:      "Current spool usage as a percentage of the configured capacity",
+		},
+	)
+
+	spoolCapacityExceededTotal := prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: "ocis_ftp",
+			Subsystem: "spool",
+			Name:      "capacity_exceeded_total",
+			Help:      "Total number of times the spool capacity was exceeded",
+		},
+	)
+
 	// Register all metrics
 	registry.MustRegister(
 		ftpSessionsTotal,
@@ -380,6 +456,11 @@ func NewOperationsServer(address string, healthConfig HealthCheckConfig) *Operat
 		ocisRequestsTotal,
 		healthCheckTotal,
 		healthCheckDuration,
+		spoolSizeBytes,
+		spoolFileCount,
+		spoolCapacityBytes,
+		spoolUsagePercent,
+		spoolCapacityExceededTotal,
 	)
 
 	// Create HTTP client for health checks
@@ -397,26 +478,31 @@ func NewOperationsServer(address string, healthConfig HealthCheckConfig) *Operat
 
 	// Create the server struct first so we can reference it in handlers
 	s := &OperationsServer{
-		address:               address,
-		mux:                  mux,
-		healthy:               1,
-		ready:                 1, // Start as ready, can be updated by health checks
-		ocisURL:               healthConfig.OCISURL,
-		ocisUsername:          healthConfig.OCISUsername,
-		ocisPassword:          healthConfig.OCISPassword,
-		webdavURL:             healthConfig.WebDAVURL,
-		spoolDirectory:        healthConfig.SpoolDirectory,
-		checkTimeout:          healthConfig.CheckTimeout,
-		httpClient:            healthCheckHTTPClient,
-		ftpSessionsTotal:      ftpSessionsTotal,
-		ftpActiveSessions:     ftpActiveSessions,
-		ftpUploadsTotal:       ftpUploadsTotal,
-		ftpUploadFailuresTotal: ftpUploadFailuresTotal,
-		ftpUploadBytesTotal:   ftpUploadBytesTotal,
-		ftpUploadDuration:     ftpUploadDuration,
-		ocisRequestsTotal:     ocisRequestsTotal,
-		healthCheckTotal:      healthCheckTotal,
-		healthCheckDuration:   healthCheckDuration,
+		address:                    address,
+		mux:                        mux,
+		healthy:                    1,
+		ready:                      1, // Start as ready, can be updated by health checks
+		ocisURL:                    healthConfig.OCISURL,
+		ocisUsername:               healthConfig.OCISUsername,
+		ocisPassword:               healthConfig.OCISPassword,
+		webdavURL:                  healthConfig.WebDAVURL,
+		spoolDirectory:             healthConfig.SpoolDirectory,
+		checkTimeout:               healthConfig.CheckTimeout,
+		httpClient:                 healthCheckHTTPClient,
+		ftpSessionsTotal:           ftpSessionsTotal,
+		ftpActiveSessions:          ftpActiveSessions,
+		ftpUploadsTotal:            ftpUploadsTotal,
+		ftpUploadFailuresTotal:     ftpUploadFailuresTotal,
+		ftpUploadBytesTotal:        ftpUploadBytesTotal,
+		ftpUploadDuration:          ftpUploadDuration,
+		ocisRequestsTotal:          ocisRequestsTotal,
+		healthCheckTotal:           healthCheckTotal,
+		healthCheckDuration:        healthCheckDuration,
+		SpoolSizeBytes:             spoolSizeBytes,
+		SpoolFileCount:             spoolFileCount,
+		SpoolCapacityBytes:         spoolCapacityBytes,
+		SpoolUsagePercent:          spoolUsagePercent,
+		SpoolCapacityExceededTotal: spoolCapacityExceededTotal,
 	}
 
 	// Health endpoint (liveness)
@@ -430,8 +516,9 @@ func NewOperationsServer(address string, healthConfig HealthCheckConfig) *Operat
 		w.Write([]byte(`{"status":"live","timestamp":` + getCurrentTimestamp() + `}`))
 	})
 
-	// Readiness endpoint
-	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+	// Readiness endpoint (authenticated: exposes oCIS/WebDAV connectivity
+	// details and spool state)
+	mux.Handle("/readyz", auth.middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Honor explicitly disabled readiness state (SetReady(false))
 		if atomic.LoadInt32(&s.ready) == 0 {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -440,11 +527,11 @@ func NewOperationsServer(address string, healthConfig HealthCheckConfig) *Operat
 			return
 		}
 
-		// Perform actual health checks
-		checks, failedChecks := s.performHealthChecks()
+		// Serve cached health check results, refreshed at most once per
+		// healthCheckCacheTTL (SEC-010).
+		checks, failedChecks := s.cachedHealthChecks()
 		
 		if len(failedChecks) > 0 {
-			atomic.StoreInt32(&s.ready, 0)
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.WriteHeader(http.StatusServiceUnavailable)
 			
@@ -477,8 +564,9 @@ func NewOperationsServer(address string, healthConfig HealthCheckConfig) *Operat
 			return
 		}
 		
-		// All checks passed
-		atomic.StoreInt32(&s.ready, 1)
+		// All checks passed. Readiness is computed per request from the
+		// check results; the handler must not mutate global readiness
+		// state (SEC-010).
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		
@@ -495,12 +583,12 @@ func NewOperationsServer(address string, healthConfig HealthCheckConfig) *Operat
 		
 		response := fmt.Sprintf(`{"status":"ready","checks":%s,"timestamp":%s}`, checksJSON, getCurrentTimestamp())
 		w.Write([]byte(response))
-	})
+	})))
 
-	// Metrics endpoint
-	mux.Handle("/metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{
+	// Metrics endpoint (authenticated: exposes process and transfer metrics)
+	mux.Handle("/metrics", auth.middleware(promhttp.HandlerFor(registry, promhttp.HandlerOpts{
 		EnableOpenMetrics: true,
-	}))
+	})))
 
 	s.server = &http.Server{
 		Addr:    address,
@@ -548,25 +636,26 @@ func (s *OperationsServer) Run(ctx context.Context) error {
 	s.started = true
 	s.mu.Unlock()
 
-	// Start the server and capture the actual listening address
+	// Bind the listener eagerly so a busy port fails fast here instead of
+	// leaving the bridge running without an operations server (SEC-009).
+	ln, err := net.Listen("tcp", s.address)
+	if err != nil {
+		s.mu.Lock()
+		s.started = false
+		s.mu.Unlock()
+		return fmt.Errorf("failed to listen on %s: %w", s.address, err)
+	}
+
+	// Store the actual address
+	s.mu.Lock()
+	s.actualAddr = ln.Addr().String()
+	s.mu.Unlock()
+
+	// Serve in the background; the listener is already bound.
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		
-		// Start the server
-		ln, err := net.Listen("tcp", s.address)
-		if err != nil {
-			return
-		}
-		
-		// Store the actual address
-		s.mu.Lock()
-		s.actualAddr = ln.Addr().String()
-		s.mu.Unlock()
-		
-		if err := s.server.Serve(ln); err != nil && err != http.ErrServerClosed {
-			return
-		}
+		_ = s.server.Serve(ln)
 	}()
 
 	// Start health check loop in the background (this will be managed by the server lifecycle)

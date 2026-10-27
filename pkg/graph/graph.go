@@ -11,7 +11,9 @@ type Client interface {
 	// ResolveDrive resolves a drive ID to drive information.
 	ResolveDrive(id string) (Drive, error)
 	
-	// ListDrives lists all drives for a user.
+	// ListDrives lists the drives visible to the authenticated user
+	// (/me/drives). userID is informational: the client always authenticates
+	// with the account's own token (QLT-005).
 	ListDrives(userID string) ([]Drive, error)
 	
 	// ResolveSpace resolves a space ID to space information.
@@ -124,95 +126,6 @@ func NewClient(baseURL, token string) Client {
 // This is the preferred method for authentication as LibreGraph API uses BasicAuth.
 func NewClientWithCredentials(baseURL, username, token string) Client {
 	return NewLibreGraphClient(baseURL, username, token)
-}
-
-// defaultClient is the default implementation of Client.
-type defaultClient struct {
-	baseURL string
-	token   string
-}
-
-// ResolveDrive implements Client.ResolveDrive.
-func (c *defaultClient) ResolveDrive(id string) (Drive, error) {
-	if id == "" {
-		return Drive{}, ErrInvalidDriveID
-	}
-	
-	// Placeholder implementation - would call LibreGraph API in production
-	return Drive{
-		ID:          id,
-		Name:        "Drive " + id,
-		Description: "Placeholder drive",
-		Owner: Owner{
-			ID:          "owner-id",
-			DisplayName: "Owner",
-		},
-		Permissions: []Permission{},
-		Root: Root{
-			ID: "root-id",
-		},
-	}, nil
-}
-
-// ListDrives implements Client.ListDrives.
-// userID can be empty to indicate the current authenticated user.
-func (c *defaultClient) ListDrives(userID string) ([]Drive, error) {
-	// Placeholder implementation - would use /me/drives for empty userID
-	return []Drive{}, nil
-}
-
-// ResolveSpace implements Client.ResolveSpace.
-func (c *defaultClient) ResolveSpace(id string) (Space, error) {
-	if id == "" {
-		return Space{}, ErrInvalidSpaceID
-	}
-	
-	// Placeholder implementation
-	return Space{
-		ID:          id,
-		Name:        "Space " + id,
-		Description: "Placeholder space",
-		Owner: Owner{
-			ID:          "owner-id",
-			DisplayName: "Owner",
-		},
-		Permissions: []Permission{},
-		Root: Root{
-			ID: "root-id",
-		},
-	}, nil
-}
-
-// ListSpaces implements Client.ListSpaces.
-func (c *defaultClient) ListSpaces(userID string) ([]Space, error) {
-	if userID == "" {
-		return nil, ErrInvalidUserID
-	}
-	
-	// Placeholder implementation
-	return []Space{}, nil
-}
-
-// SearchDrives implements Client.SearchDrives.
-// userID can be empty to indicate the current authenticated user.
-// name must not be empty.
-func (c *defaultClient) SearchDrives(userID, name string) ([]Drive, error) {
-	if name == "" {
-		return nil, ErrInvalidParameters
-	}
-	
-	// Placeholder implementation
-	return []Drive{}, nil
-}
-
-// SearchSpaces implements Client.SearchSpaces.
-func (c *defaultClient) SearchSpaces(userID, name string) ([]Space, error) {
-	if userID == "" || name == "" {
-		return nil, ErrInvalidParameters
-	}
-	
-	// Placeholder implementation
-	return []Space{}, nil
 }
 
 // Errors

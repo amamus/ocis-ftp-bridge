@@ -285,6 +285,29 @@ WebDAV is used for **file uploads and directory management** because:
 - **Configuration Errors**: Fail fast at startup with clear messages
 - **Runtime Errors**: Logged with structured fields, never leak secrets
 
+## Scaling and Multi-Replica Operation
+
+The bridge is safe to run with multiple replicas. The decision is recorded
+in ADR 0001 at `docs/adr/0001-multi-replica-scaling.md`.
+
+- **Session pinning**: the FTP Service uses `sessionAffinity: ClientIP`, so a
+  printer's long-lived control and passive data connections stay on one pod.
+  Kubernetes cannot rebalance live FTP sessions, so affinity — not
+  round-robin — is required. The passive-port Service is pinned the same
+  way: ClientIP affinity hashes the same client IP to the same pod on both
+  Services.
+- **Per-replica spool**: each pod gets its own `emptyDir` spool. Uploads are
+  pushed to oCIS within the FTP session, so the spool never needs sharing
+  between replicas. Trade-off: a pod crash loses that pod's in-flight
+  uploads; FTP has no resume, so the printer retries.
+- **Per-instance limits**: connection limits (`server.max_connections`),
+  rate limiting (`rate_limiting`), and auth lockouts are enforced in-process
+  and are therefore per-instance: with N replicas the effective limit is N
+  times the configured value. Size the limits by the replica count.
+- **Autoscaling**: the example HPA scales on CPU (min 1, max 3). Because
+  limits are per-instance, scaling replicas also scales the effective
+  connection and rate-limit budget.
+
 ## Security Considerations
 
 ### Authentication
