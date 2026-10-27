@@ -759,12 +759,15 @@ func (c *bridgeClientDriver) Rename(oldname, newname string) error {
 
 // Stat returns a FileInfo describing the named file.
 func (c *bridgeClientDriver) Stat(name string) (os.FileInfo, error) {
-	// For directories, return virtual directory info
-	if name == "/" || name == "" || name == "." {
-		return &virtualDir{name: "/"}, nil
+	// Virtual directory model: any path under the account root is a valid
+	// directory. This makes CWD succeed for any path, and MKD is a no-op
+	// (directories are created on-demand during upload). See issue #114.
+	cleanPath := filepath.Clean(name)
+	if cleanPath == "." || cleanPath == "/" {
+		cleanPath = "/"
 	}
-	// For files, return not found
-	return nil, os.ErrNotExist
+	// Return virtual directory info for any path
+	return &virtualDir{name: cleanPath}, nil
 }
 
 // Chmod changes the mode of the named file.
