@@ -1230,28 +1230,54 @@ func (w *uploadWriter) commitToWebDAV(fileRef spool.FileRef) error {
 		return fmt.Errorf("failed to ensure parent directories: %w", err)
 	}
 
-	// Open the spooled file and stream it to WebDAV. The file must never be
-	// read fully into memory: a 50 MiB upload with up to max_connections
-	// concurrent sessions would otherwise buffer several GiB transiently and
-	// get the container OOM-killed (SEC-003).
-	spooledFile, err := os.Open(fileRef.Path)
-	if err != nil {
-		return fmt.Errorf("failed to open spooled file for WebDAV upload: %w", err)
-	}
-	defer spooledFile.Close()
+	// Upload to WebDAV with retry on 412 conflict for rename policy.
+	// Concurrent uploads of the same filename can race: both pick the same
+	// unique name before either writes to WebDAV. The loser gets a 412
+	// (If-None-Match) and should retry with the next unique name. See issue #110.
+	const maxRetries = 3
+	uploadPath := finalPath
+	isRenamePolicy := transfer.CollisionPolicy(w.clientDriver.account.Upload.CollisionPolicy) == transfer.CollisionPolicyRename
 
-	// Upload to WebDAV
-	// The collision policy was already applied during path resolution. Only the
-	// explicit "overwrite" policy may replace an existing object; for rename and
-	// reject the PUT carries If-None-Match so an object that appeared after
-	// resolution fails with a conflict instead of silently overwriting it.
-	overwrite := transfer.CollisionPolicy(w.clientDriver.account.Upload.CollisionPolicy) == transfer.CollisionPolicyOverwrite
-	if err := w.clientDriver.webdavClient.UploadStream(w.clientDriver.context, finalPath, spooledFile, fileRef.Size, overwrite); err != nil {
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		// Open the spooled file and stream it to WebDAV. The file must never be
+		// read fully into memory: a 50 MiB upload with up to max_connections
+		// concurrent sessions would otherwise buffer several GiB transiently and
+		// get the container OOM-killed (SEC-003).
+		spooledFile, err := os.Open(fileRef.Path)
+		if err != nil {
+			return fmt.Errorf("failed to open spooled file for WebDAV upload: %w", err)
+		}
+
+		// The collision policy was already applied during path resolution. Only the
+		// explicit "overwrite" policy may replace an existing object; for rename and
+		// reject the PUT carries If-None-Match so an object that appeared after
+		// resolution fails with a conflict instead of silently overwriting it.
+		overwrite := transfer.CollisionPolicy(w.clientDriver.account.Upload.CollisionPolicy) == transfer.CollisionPolicyOverwrite
+		err = w.clientDriver.webdavClient.UploadStream(w.clientDriver.context, uploadPath, spooledFile, fileRef.Size, overwrite)
+		spooledFile.Close()
+		if err == nil {
+			// Success - update the spool upload path if we retried
+			if attempt > 0 {
+				w.spoolUpload.path = uploadPath
+			}
+			return nil
+		}
+
+		// On conflict (412) with rename policy, retry with a new unique name
+		if isRenamePolicy && attempt < maxRetries-1 {
+			// Generate a new unique path by appending a counter
+			dir := filepath.Dir(uploadPath)
+			base := filepath.Base(uploadPath)
+			ext := filepath.Ext(base)
+			name := strings.TrimSuffix(base, ext)
+			uploadPath = filepath.Join(dir, fmt.Sprintf("%s-%d%s", name, attempt+2, ext))
+			continue
+		}
+
 		return fmt.Errorf("WebDAV upload failed: %w", err)
 	}
 
-	// Success - the file is now in oCIS
-	return nil
+	return fmt.Errorf("WebDAV upload failed after %d retries", maxRetries)
 }
 
 // =========================================================================

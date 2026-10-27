@@ -697,14 +697,19 @@ func TestCommitToWebDAVHonorsCollisionPolicy(t *testing.T) {
 		}
 	})
 
-	t.Run("rename policy conflict fails instead of overwriting", func(t *testing.T) {
+	t.Run("rename policy conflict retries with new name", func(t *testing.T) {
 		mock, w, fileRef := setup(t, "rename", map[string][]byte{"/uploads/report.pdf": []byte("previous scan")})
 		err := w.commitToWebDAV(fileRef)
-		if err == nil {
-			t.Fatal("expected commit to fail when object appeared after path resolution")
+		if err != nil {
+			t.Fatalf("expected commit to succeed after retry with new name, got: %v", err)
 		}
+		// The original object must not be overwritten
 		if got := mock.fileContent("/uploads/report.pdf"); got != "previous scan" {
 			t.Errorf("existing object was overwritten: content = %q", got)
+		}
+		// The upload should have been retried to a new path
+		if w.spoolUpload.path == "/uploads/report.pdf" {
+			t.Error("expected spoolUpload.path to be updated to a new unique name after retry")
 		}
 	})
 
