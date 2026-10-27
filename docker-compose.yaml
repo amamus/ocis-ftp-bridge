@@ -36,8 +36,11 @@ services:
       - "2121:2121/tcp"
       # FTP passive port range
       - "40000-50000:40000-50000/tcp"
-      # HTTP operations/health port
-      - "9200:9200/tcp"
+      # The HTTP operations port (9090) is NOT published: 9200 belongs to
+      # oCIS, and the ops endpoints are protected by bridge-level basic auth
+      # (a random password is generated and logged at startup unless
+      # http.auth.password is set). Publish "9090:9090" only if you need
+      # host access, e.g. for local monitoring.
     
     # Volumes
     volumes:
@@ -50,12 +53,12 @@ services:
     
     # Health check
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9200/healthz"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/healthz"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
-    
+
     # Security options
     security_opt:
       - no-new-privileges:true

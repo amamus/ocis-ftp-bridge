@@ -17,6 +17,14 @@ server:
   # Maximum number of concurrent FTP connections
   max_connections: 100
   
+  # Allow active FTP mode (PORT/EPRT). Enabled by default because many
+  # printers require it. The bridge only ever dials the client's own IP
+  # (the data-connection peer IP must match the control-connection peer
+  # IP), but the server does open an outbound connection to a
+  # client-chosen port: restrict egress with a firewall. Set to false to
+  # force passive mode only.
+  allow_active_mode: true
+  
   # Passive FTP mode configuration
   passive:
     # Range of ports for passive FTP data connections
@@ -48,6 +56,10 @@ server:
   # Rate Limiting Configuration
   # ==========================================================================
   # Rate limiting protects against brute-force attacks and resource exhaustion
+  #
+  # Limits are enforced per bridge instance: when running multiple replicas
+  # (see docs/adr/0001-multi-replica-scaling.md), the effective limit is the
+  # configured value times the replica count. Size the values accordingly.
   rate_limiting:
     # Maximum connections per IP address (0 = unlimited)
     max_connections_per_ip: 10
@@ -99,8 +111,8 @@ observability:
 # ============================================================================
 http:
   # Address for health, readiness, and metrics endpoints
-  # Must match the port exposed in Dockerfile and docker-compose.yaml (9200)
-  address: ":9200"
+  # Must match the code default and the port exposed in the Dockerfile (9090)
+  address: ":9090"
   
   # Authentication configuration for HTTP endpoints
   # Enabled by default for security
@@ -159,6 +171,10 @@ accounts:
       
       # Maximum file size for uploads
       max_size: 100MiB
+      
+      # Maximum number of concurrent in-flight uploads for this account
+      # (0 = unlimited). Further uploads are rejected until a slot frees up.
+      max_concurrent_uploads: 4
 
   # Example scanner account
   - username: "scanner1"

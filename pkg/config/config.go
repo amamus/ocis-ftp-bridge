@@ -86,6 +86,10 @@ type ServerConfig struct {
 	Passive       PassiveConfig `yaml:"passive" json:"passive"`
 	TLS           TLSConfig     `yaml:"tls" json:"tls"`
 	MaxConnections int         `yaml:"max_connections,omitempty" json:"max_connections,omitempty"`
+	// AllowActiveMode enables FTP active mode (PORT/EPRT), which many
+	// printers require. Enabled by default; the bridge only ever dials the
+	// control connection peer's own IP (SEC-005).
+	AllowActiveMode bool `yaml:"allow_active_mode,omitempty" json:"allow_active_mode,omitempty"`
 	// Rate limiting configuration
 	RateLimiting RateLimitConfig `yaml:"rate_limiting,omitempty" json:"rate_limiting,omitempty"`
 }
@@ -174,6 +178,9 @@ type TargetConfig struct {
 type UploadConfig struct {
 	CollisionPolicy string   `yaml:"collision_policy" json:"collision_policy"`
 	MaxSize         ByteSize `yaml:"max_size" json:"max_size"`
+	// MaxConcurrentUploads caps the number of concurrent in-flight uploads
+	// for this account (0 = unlimited) (PERF-004).
+	MaxConcurrentUploads int `yaml:"max_concurrent_uploads,omitempty" json:"max_concurrent_uploads,omitempty"`
 }
 
 // LoggerConfig contains configuration for the logger
@@ -220,6 +227,7 @@ func New() *Config {
 			Listen:          ":2121",
 			Passive:         PassiveConfig{MinPort: 40000, MaxPort: 50000},
 			MaxConnections:  100,
+			AllowActiveMode: true, // Enabled by default: many printers require active mode (SEC-005)
 			// TLS is enabled by default for security
 			// Plain FTP (unencrypted) is insecure and should be avoided
 			TLS: TLSConfig{
@@ -256,9 +264,13 @@ func New() *Config {
 			},
 		},
 		HTTP: HTTPConfig{
-			Address: ":9090",
+			// Loopback by default: metrics and readiness details must not be
+			// exposed on all interfaces. Production deployments set an
+			// explicit address and front the endpoint with a TLS-terminating
+			// proxy (SEC-001).
+			Address: "127.0.0.1:9090",
 			Auth: HTTPAuthConfig{
-				Enabled: true,  // Authentication enabled by default for security
+				Enabled: true, // Authentication enabled by default for security
 				Method:  "basic",
 				Username: "admin",
 				// Password will be randomly generated on first run if not specified
@@ -452,6 +464,10 @@ func (c *Config) validateWithEnv(lookupEnv func(string) (string, bool)) error {
 	exampleHashes := []string{
 			"$argon2id$v=19$m=65536,t=3,p=1$MDEyMzQ1Njc4OWFiY2RlZg$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 			"$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJC1OeqncgJ2almHUfLnhtRTVrjD8zGQ",
+			// Hashes shipped in config.yaml.example (QLT-009): the example
+			// file must not validate cleanly against production rules.
+			"$argon2id$v=19$m=65536,t=3,p=4$jK4n6v8Bw5Fh9Lm3NqPj8H$DWQ3EeT6RfYhMjDfGvXpCnMqLkJiGfDs",
+			"$argon2id$v=19$m=65536,t=3,p=4$kL5n7v9Bw6Fh0Lm4NqPj9H$EWQ4EeT7RfYhNkDfGvXpDnMqLkJkGfDt",
 		}
 		for _, exampleHash := range exampleHashes {
 			if strings.Contains(account.PasswordHash, exampleHash) {
@@ -486,6 +502,9 @@ func (c *Config) validateWithEnv(lookupEnv func(string) (string, bool)) error {
 		}
 		if account.Upload.MaxSize == 0 {
 			return fmt.Errorf("%s.upload.max_size must be greater than zero", prefix)
+		}
+		if account.Upload.MaxConcurrentUploads < 0 {
+			return fmt.Errorf("%s.upload.max_concurrent_uploads must be >= 0 (0 = unlimited)", prefix)
 		}
 		// max_size must fit in int64: the upload hot path compares it against
 		// int64 byte counters via int64 conversion, which would overflow above

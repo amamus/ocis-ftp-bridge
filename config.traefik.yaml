@@ -1,0 +1,80 @@
+# ocis-ftp-bridge configuration for the Traefik + Let's Encrypt deployment
+# (docker-compose.traefik.yaml).
+#
+# Replace the marked values before first boot:
+#   * server.passive.public_ip  -> public IP of this host (must be an IP literal)
+#   * ocis.url                  -> your oCIS base URL (HTTPS in production)
+#   * accounts[0].target        -> drive_id or drive name for the FTP account
+#   * accounts[0].ocis.username -> oCIS service-account username
+# The App Token is NOT stored here; it comes from the OCIS_APP_TOKEN environment
+# variable (see docker-compose.traefik.yaml).
+
+server:
+  listen: ":2121"
+  max_connections: 100
+
+  passive:
+    min_port: 40000
+    max_port: 40010
+    # Public IP clients use to reach the passive data ports.
+    # REQUIRED behind NAT/Docker: replace with your public IP.
+    public_ip: "203.0.113.10"
+
+  tls:
+    # Explicit FTPS (AUTH TLS). The certificate is issued by Let's Encrypt via
+    # the certbot service in docker-compose.traefik.yaml into a shared volume
+    # and re-read from disk on every AUTH TLS, so renewals need no restart.
+    enabled: true
+    cert: "/certs/bridge-fullchain.pem"
+    key: "/certs/bridge-privkey.pem"
+
+  rate_limiting:
+    max_connections_per_ip: 10
+    max_global_connections: 100
+    max_auth_attempts_per_ip: 5
+    auth_attempt_window: 1m
+    auth_lockout_duration: 5m
+    track_failed_attempts: true
+
+ocis:
+  # Production: HTTPS only. Replace with your oCIS URL.
+  url: "https://ocis.example.com"
+  graph_url: "https://ocis.example.com/api/libregraph"
+  webdav_url: "https://ocis.example.com/webdav"
+
+spool:
+  directory: "/var/spool/ocis-ftp-bridge"
+  # Must comfortably exceed (max_connections x accounts[].upload.max_size).
+  max_total_size: 2GiB
+
+http:
+  # Operations endpoints are reached through Traefik (TLS termination + basic
+  # auth at the edge). The port is NOT published to the host; the bridge-level
+  # auth stays disabled because the edge enforces authentication and TLS.
+  address: ":9090"
+  auth:
+    enabled: false
+
+observability:
+  debug: false
+  logger:
+    level: "info"
+    format: "json"
+
+accounts:
+  - username: "printer"
+    # Generate with: go run ./cmd/hash-password <password>
+    # Replace the example hash below with your own; never reuse example hashes.
+    password_hash: "$argon2id$v=19$m=65536,t=3,p=4$jK4n6v8Bw5Fh9Lm3NqPj8H$DWQ3EeT6RfYhMjDfGvXpCnMqLkJiGfDs"
+    ocis:
+      username: "ftp-service-account"
+      app_token_env: "OCIS_APP_TOKEN"
+    target:
+      # Prefer drive_id (authoritative). drive name works if unambiguous.
+      drive_id: ""
+      drive: "Printer Uploads"
+      root: "/scans"
+    upload:
+      collision_policy: "rename"
+      # 50 MiB per upload (must be possible per requirements).
+      max_size: 50MiB

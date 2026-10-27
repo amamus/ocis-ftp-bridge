@@ -86,6 +86,7 @@ var (
 	ErrNotImplemented      = errors.New("FTP account mapping not implemented")
 	// ErrOperationNotSupported is returned when an operation is not supported
 	ErrOperationNotSupported = errors.New("operation not supported")
-	// ErrPathTraversal is returned when path traversal is detected
-	ErrPathTraversal = errors.New("path traversal detected")
+	// ErrTooManyConcurrentUploads is returned when an account already has the
+	// configured maximum number of in-flight uploads (PERF-004)
+	ErrTooManyConcurrentUploads = errors.New("too many concurrent uploads for this account")
 )

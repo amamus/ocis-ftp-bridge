@@ -1,0 +1,169 @@
+# ocis-ftp-bridge — production-oriented deployment example with Traefik + Let's Encrypt
+#
+# What this deployment gives you:
+#   * HTTPS (Let's Encrypt) for the bridge's HTTP operations endpoints
+#     (/healthz, /readyz, /metrics), protected by HTTP basic auth at the edge.
+#     The ops port is NOT published to the host; it is reachable only through
+#     Traefik on the internal compose network.
+#   * FTP control channel (2121) passed through Traefik as raw TCP. The bridge
+#     terminates explicit FTPS (AUTH TLS) itself, using a Let's Encrypt
+#     certificate issued by the one-shot `certbot` service into a shared
+#     volume. The bridge re-reads the certificate from disk on every AUTH TLS,
+#     so renewals take effect without a restart.
+#   * FTP passive data ports (40000-40010) are published directly on the
+#     bridge — the data path does not go through the proxy. The bridge
+#     advertises `passive.public_ip` (set in config.traefik.yaml) to clients.
+#
+# Prerequisites:
+#   1. DNS A/AAAA records for ${FTP_DOMAIN} and ${OPS_DOMAIN} pointing at this host.
+#   2. Ports 80, 443, 2121 and 40000-40010 reachable from the Internet (printers)
+#      and from your monitoring for ${OPS_DOMAIN}.
+#   3. Environment variables (e.g. in a .env file next to this file):
+#        FTP_DOMAIN=ftp.example.com        # explicit-FTPS hostname for printers
+#        OPS_DOMAIN=ops.example.com        # HTTPS hostname for health/metrics
+#        LE_EMAIL=admin@example.com        # Let's Encrypt account email
+#        OCIS_APP_TOKEN=...                # oCIS app token for the FTP account
+#   4. Create the basic-auth file for the ops endpoints once:
+#        docker run --rm httpd:alpine htpasswd -nbB admin 'change-me' > htpasswd
+#
+# First boot (issue the FTPS certificate BEFORE starting the bridge):
+#   docker compose -f docker-compose.traefik.yaml --profile init run --rm certbot
+#   docker compose -f docker-compose.traefik.yaml up -d
+#
+# While testing, use the Let's Encrypt STAGING CA to avoid rate limits — add this
+# line to the traefik command list below:
+#   - --certificatesresolvers.le.acme.caServer=https://acme-staging-v02.api.letsencrypt.org/directory
+#
+# Renewal (run from cron, e.g. daily — the bridge picks up renewed certs
+# automatically on the next AUTH TLS handshake):
+#   docker compose -f docker-compose.traefik.yaml --profile renew run --rm certbot-renew
+#
+# Note: oCIS itself is assumed to run elsewhere (separate deployment). Point
+# `ocis.url` in config.traefik.yaml at it; the bridge only needs outbound HTTPS.
+
+name: ocis-ftp-bridge
+
+services:
+  traefik:
+    image: traefik:v3.1
+    restart: unless-stopped
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.ftp.address=:2121
+      # Redirect plain HTTP to HTTPS
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      # Let's Encrypt via HTTP-01 challenge
+      - --certificatesresolvers.le.acme.httpchallenge.entrypoint=web
+      - --certificatesresolvers.le.acme.email=${LE_EMAIL:?set LE_EMAIL}
+      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+      # The dashboard/API are intentionally NOT exposed.
+    ports:
+      - "80:80"
+      - "443:443"
+      - "2121:2121"   # FTP control channel (TCP passthrough)
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - letsencrypt:/letsencrypt
+      - ./htpasswd:/htpasswd:ro
+    security_opt:
+      - no-new-privileges:true
+
+  ocis-ftp-bridge:
+    image: ghcr.io/amamus/ocis-ftp-bridge:latest
+    # Build locally instead of pulling from the registry:
+    # build: .
+    # image: ocis-ftp-bridge:local
+    restart: unless-stopped
+    user: "1000:1000"
+    environment:
+      TZ: UTC
+      OCIS_APP_TOKEN: ${OCIS_APP_TOKEN:?set OCIS_APP_TOKEN}
+    volumes:
+      - ./config.traefik.yaml:/app/config/config.yaml:ro
+      - ftp-certs:/certs:ro
+      - spool:/var/spool/ocis-ftp-bridge
+    ports:
+      # FTP passive data ports, published directly (must match config.traefik.yaml).
+      # Widen the range if you raise server.passive.max_port there.
+      - "40000-40010:40000-40010"
+    labels:
+      # --- HTTP operations endpoints: HTTPS + basic auth at the edge ---
+      - traefik.enable=true
+      - traefik.http.routers.bridge-ops.rule=Host(`${OPS_DOMAIN:?set OPS_DOMAIN}`) && (PathPrefix(`/healthz`) || PathPrefix(`/readyz`) || PathPrefix(`/metrics`))
+      - traefik.http.routers.bridge-ops.entrypoints=websecure
+      - traefik.http.routers.bridge-ops.tls.certresolver=le
+      - traefik.http.routers.bridge-ops.middlewares=ops-auth@docker
+      - traefik.http.middlewares.ops-auth.basicauth.usersfile=/htpasswd
+      - traefik.http.services.bridge-ops.loadbalancer.server.port=9090
+      # --- FTP control channel: raw TCP passthrough (bridge terminates AUTH TLS) ---
+      - traefik.tcp.routers.bridge-ftp.rule=HostSNI(`*`)
+      - traefik.tcp.routers.bridge-ftp.entrypoints=ftp
+      - traefik.tcp.services.bridge-ftp.loadbalancer.server.port=2121
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M,mode=1777
+    deploy:
+      resources:
+        limits:
+          # 50 MiB max upload size per account: the current commit path buffers one
+          # file in memory per upload. Until streaming commit lands, size this as
+          # ~10x the per-account max_size (see audit finding SEC-003).
+          memory: 1G
+          cpus: '1.0'
+        reservations:
+          memory: 128M
+          cpus: '0.25'
+
+  # One-shot: issues the explicit-FTPS certificate into the shared volume.
+  # Copies it to fixed filenames so config.traefik.yaml needs no domain-specific paths.
+  certbot:
+    image: certbot/certbot:latest
+    profiles: ["init"]
+    environment:
+      FTP_DOMAIN: ${FTP_DOMAIN:?set FTP_DOMAIN}
+      LE_EMAIL: ${LE_EMAIL:?set LE_EMAIL}
+    entrypoint: >-
+      sh -c "certbot certonly --standalone --http-01-port 8080
+      -d $${FTP_DOMAIN}
+      --email $${LE_EMAIL}
+      --agree-tos --no-eff-email --non-interactive
+      --deploy-hook 'cp /etc/letsencrypt/live/$${FTP_DOMAIN}/fullchain.pem /etc/letsencrypt/bridge-fullchain.pem
+      && cp /etc/letsencrypt/live/$${FTP_DOMAIN}/privkey.pem /etc/letsencrypt/bridge-privkey.pem'"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ftp-certs:/etc/letsencrypt
+
+  # Long-running renewal loop (profile "renew"; run from cron or as a daemon).
+  certbot-renew:
+    image: certbot/certbot:latest
+    profiles: ["renew"]
+    environment:
+      FTP_DOMAIN: ${FTP_DOMAIN:?set FTP_DOMAIN}
+    entrypoint: >-
+      sh -c "trap exit TERM;
+      while :; do
+        certbot renew --quiet
+        && cp /etc/letsencrypt/live/$${FTP_DOMAIN}/fullchain.pem /etc/letsencrypt/bridge-fullchain.pem
+        && cp /etc/letsencrypt/live/$${FTP_DOMAIN}/privkey.pem /etc/letsencrypt/bridge-privkey.pem;
+        sleep 12h & wait $${!};
+      done"
+    volumes:
+      - ftp-certs:/etc/letsencrypt
+
+volumes:
+  letsencrypt:
+  ftp-certs:
+  spool:

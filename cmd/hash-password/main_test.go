@@ -176,3 +176,34 @@ func TestHashPasswordInvalidParams(t *testing.T) {
 		})
 	}
 }
+
+// TestHashPasswordReadsPasswordFromStdin verifies that hash-password reads
+// the password from stdin when no argument is given, so the plaintext never
+// appears in the process list or shell history (SEC-013).
+func TestHashPasswordReadsPasswordFromStdin(t *testing.T) {
+	bin := t.TempDir() + "/hash-password"
+	buildCmd := exec.Command("go", "build", "-o", bin, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build hash-password: %v\n%s", err, out)
+	}
+
+	runCmd := exec.Command(bin)
+	runCmd.Stdin = strings.NewReader("stdin-secret-456\n")
+	out, err := runCmd.Output()
+	if err != nil {
+		t.Fatalf("hash-password without arguments must read the password from stdin (SEC-013): %v", err)
+	}
+
+	hash := strings.TrimSpace(string(out))
+	if !strings.HasPrefix(hash, "$argon2id$v=19$") {
+		t.Fatalf("expected Argon2id PHC string on stdout, got: %s", hash)
+	}
+
+	ok, err := config.VerifyPassword(hash, "stdin-secret-456")
+	if err != nil {
+		t.Fatalf("VerifyPassword returned error: %v", err)
+	}
+	if !ok {
+		t.Fatal("hash read from stdin does not verify against the stdin password")
+	}
+}

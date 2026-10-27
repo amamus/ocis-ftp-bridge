@@ -9,9 +9,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -324,46 +322,64 @@ func (tm *TransferManager) validateTargetPath(targetPath, targetRoot string) err
 	return nil
 }
 
+// maxUniqueFilenameAttempts bounds the rename candidate search.
+const maxUniqueFilenameAttempts = 100
+
 // GenerateUniqueFilename generates a unique filename for collision avoidance
 // This implements the rename collision policy
-func (tm *TransferManager) GenerateUniqueFilename(basePath, filename string) string {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
+// Existence is checked in oCIS via the WebDAV client — basePath is a WebDAV
+// path, so the local filesystem is never consulted. Without a WebDAV client
+// the function fails closed instead of guessing.
+func (tm *TransferManager) GenerateUniqueFilename(basePath, filename string) (string, error) {
+	if tm.webdavClient == nil {
+		return "", fmt.Errorf("no WebDAV client configured for unique filename generation")
+	}
 
 	// Extract extension
 	ext := filepath.Ext(filename)
 	base := strings.TrimSuffix(filename, ext)
 
-	// Generate timestamp suffix
+	// The original filename is fine when nothing exists at that path in oCIS
+	exists, err := tm.CheckCollision(filepath.Join(basePath, filename))
+	if err != nil {
+		return "", err
+	}
+	if !exists {
+		return filename, nil
+	}
+
+	// The object exists: derive candidates from a UTC timestamp plus a
+	// per-basePath counter so concurrent uploads of the same name still get
+	// distinct candidates
 	timestamp := time.Now().UTC().Format("20060102-150405")
-
-	// Try the original filename first (for testing)
-	fullPath := filepath.Join(basePath, filename)
-	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
-		return filename
+	for attempt := 0; attempt < maxUniqueFilenameAttempts; attempt++ {
+		candidate := fmt.Sprintf("%s-%s%s", base, timestamp, ext)
+		if attempt > 0 {
+			tm.mu.Lock()
+			tm.uploadCounters[basePath]++
+			counter := tm.uploadCounters[basePath]
+			tm.mu.Unlock()
+			candidate = fmt.Sprintf("%s-%s-%d%s", base, timestamp, counter, ext)
+		}
+		exists, err := tm.CheckCollision(filepath.Join(basePath, candidate))
+		if err != nil {
+			return "", err
+		}
+		if !exists {
+			return candidate, nil
+		}
 	}
 
-	// Generate unique filename with timestamp
-	newFilename := fmt.Sprintf("%s-%s%s", base, timestamp, ext)
-	fullPath = filepath.Join(basePath, newFilename)
-	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
-		return newFilename
-	}
-
-	// If that also exists, add a counter
-	counter := tm.uploadCounters[basePath] + 1
-	tm.uploadCounters[basePath] = counter
-	newFilename = fmt.Sprintf("%s-%s-%d%s", base, timestamp, counter, ext)
-
-	return newFilename
+	return "", fmt.Errorf("unable to find a free filename for %q in %q after %d attempts", filename, basePath, maxUniqueFilenameAttempts)
 }
 
 // CheckCollision checks if a file already exists at the target path
 func (tm *TransferManager) CheckCollision(targetPath string) (bool, error) {
 	// Use WebDAV client to check if the path exists
 	if tm.webdavClient == nil {
-		// Fallback: assume file doesn't exist
-		return false, nil
+		// Fail closed: without a WebDAV client we cannot verify whether the
+		// path exists, so collision handling must not silently pass
+		return false, fmt.Errorf("no WebDAV client configured for collision check of %q", targetPath)
 	}
 
 	// Check if the path exists using WebDAV
@@ -398,7 +414,7 @@ func (tm *TransferManager) ResolveCollision(basePath, filename string, policy Co
 
 	case CollisionPolicyRename:
 		// Generate unique filename
-		return tm.GenerateUniqueFilename(basePath, filename), nil
+		return tm.GenerateUniqueFilename(basePath, filename)
 
 	default:
 		return "", errors.InvalidInput("unknown collision policy", map[string]interface{}{"policy": policy})
@@ -408,8 +424,9 @@ func (tm *TransferManager) ResolveCollision(basePath, filename string, policy Co
 // EnsureParentDirectories creates all parent directories for a given path
 func (tm *TransferManager) EnsureParentDirectories(targetPath string) error {
 	if tm.webdavClient == nil {
-		// Without WebDAV client, we can't create directories
-		return nil
+		// Fail closed: without a WebDAV client no directories can be
+		// created, and the upload would fail at the PUT with 409 anyway
+		return fmt.Errorf("no WebDAV client configured for directory creation")
 	}
 
 	// Get the parent directory
@@ -421,23 +438,21 @@ func (tm *TransferManager) EnsureParentDirectories(targetPath string) error {
 
 	// Check if parent directory exists
 	exists, err := tm.webdavClient.CheckPathExistence(tm.context, parentDir)
-	if err != nil {
-		// If we can't check, try to create anyway
-		return tm.webdavClient.CreateDirectory(tm.context, parentDir)
+	if err == nil && exists {
+		return nil
 	}
 
-	if !exists {
-		// Create the parent directory (and any missing parents)
-		return tm.createParentDirectoriesRecursive(parentDir)
-	}
-
-	return nil
+	// The parent is missing (or its existence is unknown): create it and any
+	// missing parents recursively. MKCOL is idempotent for collections that
+	// already exist.
+	return tm.createParentDirectoriesRecursive(parentDir)
 }
 
 // createParentDirectoriesRecursive creates all parent directories recursively
 func (tm *TransferManager) createParentDirectoriesRecursive(path string) error {
 	if tm.webdavClient == nil {
-		return nil
+		// Fail closed: without a WebDAV client no directories can be created
+		return fmt.Errorf("no WebDAV client configured for directory creation")
 	}
 
 	// Get the parent of this path
@@ -514,28 +529,4 @@ func (tm *TransferManager) ProcessUpload(request TransferRequest) TransferResult
 		Size:       request.Size,
 		Success:    true,
 	}
-}
-
-// Path validation helpers
-
-// isSafePath checks if a path contains only safe characters
-func isSafePath(path string) bool {
-	// Allow alphanumeric, spaces, common punctuation, and Unicode
-	safePattern := regexp.MustCompile(`^[\w\s\-.~/]+$`)
-	return safePattern.MatchString(path)
-}
-
-// Extract components from a path
-func extractPathComponents(path string) []string {
-	if path == "" || path == "." || path == "/" {
-		return []string{}
-	}
-
-	// Remove leading/trailing slashes and split
-	trimmed := strings.Trim(path, "/")
-	if trimmed == "" {
-		return []string{}
-	}
-
-	return strings.Split(trimmed, "/")
 }
