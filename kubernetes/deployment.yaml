@@ -129,12 +129,12 @@ spec:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     
     spec:
-      # Run as non-root for security
+      # Run as non-root for security.
+      # Do NOT override runAsUser/runAsGroup — the image's /app is 750
+      # owned by appuser:appgroup (uid 100). Forcing uid 1000 prevents
+      # the container from traversing /app. See issue #112.
       securityContext:
         runAsNonRoot: true
-        runAsUser: 1000
-        runAsGroup: 1000
-        fsGroup: 1000
         fsGroupChangePolicy: "OnRootMismatch"
         
       serviceAccountName: ocis-ftp-bridge

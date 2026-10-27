@@ -23,8 +23,10 @@ services:
     container_name: ocis-ftp-bridge
     restart: unless-stopped
     
-    # Run as non-root user for security
-    user: "1000:1000"
+    # Run as the image's default user (appuser, uid 100).
+    # Do NOT override with a uid:gid — the image's /app is 750
+    # owned by appuser:appgroup, so uid 1000 cannot traverse it.
+    # See issue #112.
     
     # Environment variables
     environment:
