@@ -503,9 +503,16 @@ func (d *BridgeDriver) AuthUser(cc ftpserver.ClientContext, user, password strin
 		return nil, fmt.Errorf("drive resolution failed: %w", err)
 	}
 
-	// Create WebDAV client for this account
+	// Create WebDAV client for this account using the resolved drive's URL.
+	// Using the drive-specific URL ensures uploads land in the correct
+	// project space, not the service user's personal space. See issue #107.
+	webdavBaseURL := resolvedDrive.WebDAVURL
+	if webdavBaseURL == "" {
+		// Fallback to the global config if the drive didn't provide a URL
+		webdavBaseURL = d.cfg.OCIS.WebDAVURL
+	}
 	webdavClient := webdav.NewClientWithCredentials(
-		d.cfg.OCIS.WebDAVURL,
+		webdavBaseURL,
 		account.OCIS.Username,
 		account.AppToken,
 	)

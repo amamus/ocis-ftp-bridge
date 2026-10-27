@@ -310,14 +310,14 @@ func TestLibreGraphClient_WithMockServer(t *testing.T) {
 	assert.Equal(t, "drive1", drives[0].ID)
 	assert.Equal(t, "Test Drive", drives[0].Name)
 	// WebDAV URL should be derived from webUrl
-	assert.Equal(t, "http://localhost:9200/webdav", drives[0].WebDAVURL)
+	assert.Equal(t, "http://localhost:9200/dav/spaces/drive1", drives[0].WebDAVURL)
 
 	// Test ResolveDrive
 	drive, err := client.ResolveDrive("drive1")
 	require.NoError(t, err)
 	assert.Equal(t, "drive1", drive.ID)
 	assert.Equal(t, "Test Drive", drive.Name)
-	assert.Equal(t, "http://localhost:9200/webdav", drive.WebDAVURL)
+	assert.Equal(t, "http://localhost:9200/dav/spaces/drive1", drive.WebDAVURL)
 }
 
 func TestLibreGraphClient_Unauthorized(t *testing.T) {
