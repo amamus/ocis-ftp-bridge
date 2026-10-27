@@ -1236,6 +1236,7 @@ func (w *uploadWriter) Close() error {
 		// Record Prometheus metrics. See issue #115.
 		if w.clientDriver.bridgeDriver.metrics != nil {
 			w.clientDriver.bridgeDriver.metrics.IncrementUploadsTotal("success")
+			// #nosec G115 -- fileRef.Size is validated non-negative by spool manager
 			w.clientDriver.bridgeDriver.metrics.AddUploadBytes(uint64(fileRef.Size))
 			w.clientDriver.bridgeDriver.metrics.ObserveUploadDuration(time.Since(w.spoolUpload.startTime), "success")
 		}
