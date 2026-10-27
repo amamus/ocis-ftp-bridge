@@ -796,10 +796,11 @@ func (m *defaultManager) ListAll() ([]SpoolFile, error) {
 			return nil
 		}
 
-		// Skip temporary files
-		if strings.HasSuffix(info.Name(), ".tmp") {
-			return nil
-		}
+		// Include temporary files so Cleanup can remove stale ones.
+		// Active .tmp files are only present during uploads; at startup
+		// (when Cleanup runs) all .tmp files are orphans from interrupted
+		// uploads. See issue #109.
+		_ = info // info is used below for size and modtime
 
 		// Determine user ID from path
 		relPath, err := filepath.Rel(absSpoolDir, path)

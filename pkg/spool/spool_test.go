@@ -990,3 +990,59 @@ func TestUploadFlow_UnknownSize(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, data, spooled)
 }
+
+// TestListAllIncludesTmpFiles verifies that ListAll includes .tmp files
+// so that Cleanup can remove stale ones from interrupted uploads. See issue #109.
+func TestListAllIncludesTmpFiles(t *testing.T) {
+	t.Parallel()
+
+	tempDir, err := os.MkdirTemp("", "spool-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	manager, err := NewManager(tempDir, 1024*1024)
+	require.NoError(t, err)
+
+	// Create a user directory with a stale .tmp file (simulating an interrupted upload)
+	userDir := filepath.Join(tempDir, "testuser")
+	require.NoError(t, os.MkdirAll(userDir, 0750))
+
+	staleTmpPath := filepath.Join(userDir, "upload-stale.tmp")
+	require.NoError(t, os.WriteFile(staleTmpPath, []byte("partial data"), 0600))
+
+	// Create a committed file too
+	committedPath := filepath.Join(userDir, "file-abc123")
+	require.NoError(t, os.WriteFile(committedPath, []byte("complete"), 0600))
+
+	// ListAll should include the .tmp file
+	allFiles, err := manager.ListAll()
+	require.NoError(t, err)
+
+	var foundTmp, foundCommitted bool
+	for _, f := range allFiles {
+		if strings.HasSuffix(f.FileID, ".tmp") {
+			foundTmp = true
+		}
+		if f.FileID == "file-abc123" {
+			foundCommitted = true
+		}
+	}
+	assert.True(t, foundTmp, "ListAll should include .tmp files so Cleanup can remove them")
+	assert.True(t, foundCommitted, "ListAll should include committed files")
+
+	// Cleanup should remove the stale .tmp file (set maxAge to 0 to remove everything old)
+	// First, set the .tmp file's mtime to the past
+	oldTime := time.Now().Add(-2 * time.Hour)
+	require.NoError(t, os.Chtimes(staleTmpPath, oldTime, oldTime))
+
+	err = manager.Cleanup(30) // 30 minutes
+	require.NoError(t, err)
+
+	// The .tmp file should be gone
+	_, err = os.Stat(staleTmpPath)
+	assert.True(t, os.IsNotExist(err), "stale .tmp file should have been cleaned up")
+
+	// The committed file (recent) should still exist
+	_, err = os.Stat(committedPath)
+	assert.NoError(t, err, "recent committed file should not have been cleaned up")
+}
