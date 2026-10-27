@@ -74,17 +74,17 @@ func (e *WebDAVError) Error() string {
 }
 
 var (
-	ErrInvalidPath        = &WebDAVError{msg: "invalid path"}
-	ErrEmptyData          = &WebDAVError{msg: "empty data"}
-	ErrNotImplemented      = &WebDAVError{msg: "operation not implemented"}
-	ErrUploadFailed        = &WebDAVError{msg: "upload failed"}
-	ErrPathNotFound       = &WebDAVError{msg: "path not found"}
-	ErrUnauthorized       = &WebDAVError{msg: "unauthorized"}
-	ErrForbidden          = &WebDAVError{msg: "forbidden"}
-	ErrWebDAVAPIError     = &WebDAVError{msg: "WebDAV API error"}
-	ErrPathTraversal      = &WebDAVError{msg: "path traversal"}
-	ErrUploadConflict     = &WebDAVError{msg: "upload conflict - file already exists"}
-	ErrFileTooLarge       = &WebDAVError{msg: "file too large"}
-	ErrRateLimited        = &WebDAVError{msg: "rate limited"}
-	ErrTemporaryFailure   = &WebDAVError{msg: "temporary server failure"}
+	ErrInvalidPath      = &WebDAVError{msg: "invalid path"}
+	ErrEmptyData        = &WebDAVError{msg: "empty data"}
+	ErrNotImplemented   = &WebDAVError{msg: "operation not implemented"}
+	ErrUploadFailed     = &WebDAVError{msg: "upload failed"}
+	ErrPathNotFound     = &WebDAVError{msg: "path not found"}
+	ErrUnauthorized     = &WebDAVError{msg: "unauthorized"}
+	ErrForbidden        = &WebDAVError{msg: "forbidden"}
+	ErrWebDAVAPIError   = &WebDAVError{msg: "WebDAV API error"}
+	ErrPathTraversal    = &WebDAVError{msg: "path traversal"}
+	ErrUploadConflict   = &WebDAVError{msg: "upload conflict - file already exists"}
+	ErrFileTooLarge     = &WebDAVError{msg: "file too large"}
+	ErrRateLimited      = &WebDAVError{msg: "rate limited"}
+	ErrTemporaryFailure = &WebDAVError{msg: "temporary server failure"}
 )

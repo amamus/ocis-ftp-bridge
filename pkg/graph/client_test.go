@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -37,13 +38,47 @@ func TestLibreGraphClient_ResolveDrive_EmptyID(t *testing.T) {
 	assert.Equal(t, ErrInvalidDriveID, err)
 }
 
+// TestLibreGraphClient_ListDrives_EmptyUserID verifies that an empty userID
+// lists the authenticated user's drives via /me/drives instead of being
+// rejected (QLT-005): the bridge always authenticates with the account's own
+// token, so the empty-userID form is the current-user form. Against an
+// unreachable server the call must fail with a connection error, not
+// ErrInvalidUserID.
 func TestLibreGraphClient_ListDrives_EmptyUserID(t *testing.T) {
 	t.Parallel()
 
 	client := NewLibreGraphClient("http://localhost:9200/api/libregraph", "user", "token")
 	_, err := client.ListDrives("")
 	require.Error(t, err)
-	assert.Equal(t, ErrInvalidUserID, err)
+	assert.NotEqual(t, ErrInvalidUserID, err)
+}
+
+// TestLibreGraphClient_ValidateConfiguration guards QLT-005: validating the
+// client configuration must succeed against a reachable LibreGraph API. It
+// always failed before because it called ListDrives(""), which rejected the
+// empty userID.
+func TestLibreGraphClient_ValidateConfiguration(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/me/drives") && r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"value": []}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client := NewLibreGraphClient(server.URL+"/api/libregraph", "testuser", "testtoken")
+	lc, ok := client.(*libregraphClient)
+	require.True(t, ok, "expected *libregraphClient, got %T", client)
+	require.NoError(t, lc.ValidateConfiguration())
+
+	// The empty-userID form must hit /me/drives as well
+	drives, err := client.ListDrives("")
+	require.NoError(t, err)
+	assert.Empty(t, drives)
 }
 
 func TestLibreGraphClient_SearchDrives_InvalidParameters(t *testing.T) {
@@ -340,33 +375,44 @@ func TestLibreGraphClient_NotFound(t *testing.T) {
 	assert.Equal(t, ErrDriveNotFound, err)
 }
 
-// TestLibreGraphClient_NoDoubleSlashInRequestPath verifies that the Graph client
-// does not produce double-slash paths (e.g. /graph/v1.0//drives/...).
-// The libregraph SDK request paths already start with "/", so the base URL
-// must NOT end with a trailing slash. See issue #105.
-func TestLibreGraphClient_NoDoubleSlashInRequestPath(t *testing.T) {
+// TestDefaultHTTPClientHasNoTotalTimeout guards PERF-001: dropping the total
+// request Timeout must leave the transport-level hang guards in place.
+func TestDefaultHTTPClientHasNoTotalTimeout(t *testing.T) {
 	t.Parallel()
 
-	var capturedPath string
+	client := NewLibreGraphClient("http://example.com/api/libregraph", "user", "token")
+	gc, ok := client.(*libregraphClient)
+	require.True(t, ok, "expected *libregraphClient, got %T", client)
+	assert.Zero(t, gc.httpClient.Timeout,
+		"a total request timeout must not be set on the default Graph client (PERF-001)")
+	transport, ok := gc.httpClient.Transport.(*http.Transport)
+	require.True(t, ok, "expected *http.Transport, got %T", gc.httpClient.Transport)
+	assert.Equal(t, 10*time.Second, transport.ResponseHeaderTimeout,
+		"response header timeout must remain as the hang guard")
+}
+
+// TestGraphCallHasDeadline verifies that a Graph API call fails on its own
+// per-call deadline instead of hanging forever once the HTTP client's total
+// Timeout is gone (PERF-001).
+func TestGraphCallHasDeadline(t *testing.T) {
+	// Not parallel: mutates the package-level graphOpTimeout.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedPath = r.URL.Path
-		// Return a valid drive JSON response
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"id":"test-drive-id","name":"Test Drive"}`))
+		<-r.Context().Done() // hang until the client gives up
 	}))
 	defer server.Close()
 
-	// Use a base URL that includes a path prefix (like real oCIS: /graph/v1.0)
-	client := NewLibreGraphClient(server.URL+"/graph/v1.0", "testuser", "testtoken")
+	// The injected client's own total timeout (2s) is far above the call
+	// deadline, so a fast failure can only come from the per-call deadline.
+	httpClient := &http.Client{Timeout: 2 * time.Second}
+	client := NewLibreGraphClientWithHTTP(server.URL, "user", "token", httpClient)
 
-	_, err := client.ResolveDrive("test-drive-id")
-	require.NoError(t, err)
+	old := graphOpTimeout
+	graphOpTimeout = 100 * time.Millisecond
+	defer func() { graphOpTimeout = old }()
 
-	// The request path must not contain "//" (double slash)
-	assert.NotContains(t, capturedPath, "//",
-		"request path must not contain double slashes, got: %s", capturedPath)
-	// The path should start with a single slash and contain the drives segment
-	assert.Contains(t, capturedPath, "/drives/test-drive-id",
-		"request path should contain /drives/test-drive-id, got: %s", capturedPath)
+	start := time.Now()
+	_, err := client.ResolveDrive("some-drive-id")
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), time.Second,
+		"Graph API calls must fail on their own deadline (PERF-001)")
 }

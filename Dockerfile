@@ -6,7 +6,9 @@
 # ============================================================================
 # Build stage
 # ============================================================================
-FROM golang:1.27-alpine AS builder
+# Pinned to the 1.27.2 release and its manifest-list digest: Go 1.27.0/1.27.1
+# ship 9 stdlib CVEs fixed in 1.27.2 (GO-2026-6603...6617, SEC-007).
+FROM golang:1.27.2-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d AS builder
 
 # Set build arguments
 ARG APP_NAME=ocis-ftp-bridge
@@ -86,7 +88,7 @@ EXPOSE 2121/tcp
 # FTP passive port range (example)
 EXPOSE 40000-50000/tcp
 # HTTP operations/health port
-EXPOSE 9200/tcp
+EXPOSE 9090/tcp
 
 # Set entrypoint
 ENTRYPOINT ["/app/bin/ocis-ftp-bridge"]
@@ -96,7 +98,7 @@ CMD ["-config", "/app/config/config.yaml"]
 
 # Health check - check that the HTTP health endpoint responds
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-	CMD wget --quiet --tries=1 --spider http://localhost:9200/healthz || exit 1
+	CMD wget --quiet --tries=1 --spider http://localhost:9090/healthz || exit 1
 
 # Volumes for persistent data
 VOLUME ["/app/spool", "/app/config", "/app/logs"]

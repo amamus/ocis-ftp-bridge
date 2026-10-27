@@ -1,15 +1,17 @@
 package webdav
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
-	"github.com/amamus/ocis-ftp-bridge/pkg/graph"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -468,26 +470,6 @@ func TestWebDAVClient_UnicodePath(t *testing.T) {
 	}
 }
 
-func TestNewWebDAVClientFromGraph(t *testing.T) {
-	t.Parallel()
-
-	// Test creating a WebDAV client from a graph drive
-	drive := graph.Drive{
-		ID:        "drive1",
-		Name:      "Test Drive",
-		WebDAVURL: "https://ocis.example.com/webdav",
-	}
-
-	client := NewWebDAVClientFromGraph(drive, "testuser", "testtoken")
-	require.NotNil(t, client)
-
-	// The client should be usable
-	ctx := context.Background()
-	_, err := client.CheckPathExistence(ctx, "/")
-	// This will fail because the server doesn't exist, but the client should be properly created
-	require.Error(t, err)
-}
-
 func TestWebDAVClient_EmptyData(t *testing.T) {
 	t.Parallel()
 
@@ -508,4 +490,142 @@ func TestWebDAVClient_EmptyData(t *testing.T) {
 	err = client.UploadStream(ctx, "/test.txt", nil, 0, true)
 	require.Error(t, err)
 	assert.Equal(t, ErrEmptyData, err)
+}
+
+// TestDefaultHTTPClientHasNoTotalTimeout guards PERF-001: the default HTTP
+// client must not bound the ENTIRE request — including a 50 MiB upload
+// body — with a total Timeout. ResponseHeaderTimeout stays as the hang
+// guard for the response.
+func TestDefaultHTTPClientHasNoTotalTimeout(t *testing.T) {
+	t.Parallel()
+
+	client := NewWebDAVClient("http://example.com/webdav", "user", "token")
+	wc, ok := client.(*webdavClient)
+	require.True(t, ok, "expected *webdavClient, got %T", client)
+	assert.Zero(t, wc.httpClient.Timeout,
+		"a total request timeout aborts large uploads mid-body (PERF-001)")
+	transport, ok := wc.httpClient.Transport.(*http.Transport)
+	require.True(t, ok, "expected *http.Transport, got %T", wc.httpClient.Transport)
+	assert.Equal(t, 10*time.Second, transport.ResponseHeaderTimeout,
+		"response header timeout must remain as the hang guard")
+}
+
+// TestUploadStreamRetriesTemporaryFailures verifies that a WebDAV upload is
+// retried with a rewound body when the server answers 5xx (PERF-001).
+func TestUploadStreamRetriesTemporaryFailures(t *testing.T) {
+	t.Parallel()
+
+	var puts int32
+	var lastBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		if atomic.AddInt32(&puts, 1) <= 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		lastBody = body
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+
+	client := NewWebDAVClient(server.URL, "user", "token")
+	content := []byte("scan data that must survive retries")
+	err := client.UploadStream(context.Background(), "/report.pdf", bytes.NewReader(content), int64(len(content)), true)
+	require.NoError(t, err)
+	assert.Equal(t, int32(3), atomic.LoadInt32(&puts), "expected two retries after 503 responses")
+	assert.Equal(t, content, lastBody, "the retried request must resend the full body")
+}
+
+// TestUploadStreamRetryIsBounded verifies that retries on temporary failures
+// stop after a fixed number of attempts instead of looping forever.
+func TestUploadStreamRetryIsBounded(t *testing.T) {
+	t.Parallel()
+
+	var puts int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&puts, 1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	client := NewWebDAVClient(server.URL, "user", "token")
+	err := client.UploadStream(context.Background(), "/report.pdf", bytes.NewReader([]byte("data")), 4, true)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrTemporaryFailure)
+	assert.Equal(t, int32(3), atomic.LoadInt32(&puts), "retries must be bounded")
+}
+
+// TestUploadStreamDoesNotRetryPermanentErrors verifies that non-temporary
+// failures (e.g. a 409 conflict) fail immediately without a retry.
+func TestUploadStreamDoesNotRetryPermanentErrors(t *testing.T) {
+	t.Parallel()
+
+	var puts int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&puts, 1)
+		w.WriteHeader(http.StatusConflict)
+	}))
+	defer server.Close()
+
+	client := NewWebDAVClient(server.URL, "user", "token")
+	err := client.UploadStream(context.Background(), "/report.pdf", bytes.NewReader([]byte("data")), 4, false)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrUploadConflict)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&puts), "permanent errors must not be retried")
+}
+
+// nonSeekReader hides the Seek method of the wrapped reader.
+type nonSeekReader struct{ r io.Reader }
+
+func (n nonSeekReader) Read(p []byte) (int, error) { return n.r.Read(p) }
+
+// TestUploadStreamDoesNotRetryNonSeekableBody verifies that a body which
+// cannot be rewound is not retried: resending a consumed reader would upload
+// a truncated or empty file.
+func TestUploadStreamDoesNotRetryNonSeekableBody(t *testing.T) {
+	t.Parallel()
+
+	var puts int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&puts, 1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	client := NewWebDAVClient(server.URL, "user", "token")
+	err := client.UploadStream(context.Background(), "/report.pdf", nonSeekReader{bytes.NewReader([]byte("data"))}, 4, true)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrTemporaryFailure)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&puts), "a body that cannot be rewound must not be retried")
+}
+
+// TestControlOperationHasDeadline verifies that WebDAV control operations
+// fail on their own per-call deadline instead of hanging forever once the
+// HTTP client's total Timeout is gone (PERF-001). Uploads are exempt: their
+// duration scales with the file size.
+func TestControlOperationHasDeadline(t *testing.T) {
+	// Not parallel: mutates the package-level controlOpTimeout.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done() // hang until the client gives up
+	}))
+	defer server.Close()
+
+	// The injected client's own total timeout (2s) is far above the control
+	// deadline, so a fast failure can only come from the per-call deadline.
+	httpClient := &http.Client{Timeout: 2 * time.Second}
+	client := NewWebDAVClientWithHTTP(server.URL, "user", "token", httpClient)
+
+	old := controlOpTimeout
+	controlOpTimeout = 100 * time.Millisecond
+	defer func() { controlOpTimeout = old }()
+
+	start := time.Now()
+	_, err := client.CheckPathExistence(context.Background(), "/anything")
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), time.Second,
+		"control operations must fail on their own deadline (PERF-001)")
 }

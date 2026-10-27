@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/argon2"
+	"gopkg.in/yaml.v3"
 )
 
 func testHash(password string) string {
@@ -551,4 +552,131 @@ func TestParseArgon2IDDigestLengthLimit(t *testing.T) {
 	if _, err := parseArgon2ID(build(4097)); err == nil {
 		t.Fatal("expected 4097-byte digest to be rejected")
 	}
+}
+
+// TestDefaultHTTPAddressIsLoopback guards SEC-001: the operations HTTP server
+// must bind to loopback by default. Metrics and readiness details must not be
+// exposed on all interfaces; production deployments set http.address
+// explicitly and front the endpoint with a TLS-terminating proxy.
+func TestDefaultHTTPAddressIsLoopback(t *testing.T) {
+	cfg := New()
+	if cfg.HTTP.Address != "127.0.0.1:9090" {
+		t.Errorf("default http.address = %q, want 127.0.0.1:9090 (SEC-001)", cfg.HTTP.Address)
+	}
+}
+
+// TestExampleConfigHashesAreBlocklisted guards QLT-009: the password hashes
+// shipped in config.yaml.example must be rejected by Validate, so a
+// copy-pasted example config fails fast instead of running with publicly
+// known credentials.
+func TestExampleConfigHashesAreBlocklisted(t *testing.T) {
+	data, err := os.ReadFile("../../config.yaml.example")
+	if err != nil {
+		t.Fatalf("failed to read config.yaml.example: %v", err)
+	}
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("config.yaml.example is not valid YAML: %v", err)
+	}
+	t.Setenv("OCIS_APP_TOKEN", "dummy-token")
+	t.Setenv("SCANNER_OCIS_APP_TOKEN", "dummy-token-2")
+
+	err = cfg.Validate()
+	if err == nil {
+		t.Fatal("config.yaml.example validates cleanly; its shipped password hashes must be blocklisted (QLT-009)")
+	}
+	if !strings.Contains(err.Error(), "example/default hash") {
+		t.Errorf("Validate error = %v, want it to reject the example password hashes (QLT-009)", err)
+	}
+}
+
+// TestAllowActiveModeConfigKey guards SEC-005: the server.allow_active_mode
+// key must be accepted by the strict configuration loader so active FTP mode
+// is configurable (it defaults to enabled for printer compatibility).
+func TestAllowActiveModeConfigKey(t *testing.T) {
+	env := map[string]string{"OCIS_FTP_RECEPTION_TOKEN": "app-token-secret"}
+
+	t.Run("explicitly disabled", func(t *testing.T) {
+		yamlText := strings.Replace(validYAML(testHash("printer-secret")),
+			"  listen: \":21\"\n",
+			"  listen: \":21\"\n  allow_active_mode: false\n",
+			1)
+		cfg, err := loadText(t, yamlText, env)
+		if err != nil {
+			t.Fatalf("config with server.allow_active_mode: false failed to load: %v (SEC-005)", err)
+		}
+		if cfg.Server.AllowActiveMode {
+			t.Error("AllowActiveMode = true, want false (SEC-005)")
+		}
+	})
+
+	t.Run("explicitly enabled", func(t *testing.T) {
+		yamlText := strings.Replace(validYAML(testHash("printer-secret")),
+			"  listen: \":21\"\n",
+			"  listen: \":21\"\n  allow_active_mode: true\n",
+			1)
+		cfg, err := loadText(t, yamlText, env)
+		if err != nil {
+			t.Fatalf("config with server.allow_active_mode: true failed to load: %v (SEC-005)", err)
+		}
+		if !cfg.Server.AllowActiveMode {
+			t.Error("AllowActiveMode = false, want true (SEC-005)")
+		}
+	})
+
+	t.Run("key absent", func(t *testing.T) {
+		cfg, err := loadText(t, validYAML(testHash("printer-secret")), env)
+		if err != nil {
+			t.Fatalf("config without allow_active_mode failed to load: %v", err)
+		}
+		if !cfg.Server.AllowActiveMode {
+			t.Error("AllowActiveMode default = false, want true: active mode must default to enabled for printer compatibility (SEC-005)")
+		}
+	})
+}
+
+// TestMaxConcurrentUploadsConfigKey guards PERF-004: the per-account upload
+// concurrency cap accounts[].upload.max_concurrent_uploads must be accepted
+// by the strict configuration loader, must parse into the account config, and
+// must default to 0 (unlimited) when absent.
+func TestMaxConcurrentUploadsConfigKey(t *testing.T) {
+	env := map[string]string{"OCIS_FTP_RECEPTION_TOKEN": "app-token-secret"}
+
+	t.Run("explicitly set", func(t *testing.T) {
+		yamlText := strings.Replace(validYAML(testHash("printer-secret")),
+			"      max_size: 250MiB\n",
+			"      max_size: 250MiB\n      max_concurrent_uploads: 2\n",
+			1)
+		cfg, err := loadText(t, yamlText, env)
+		if err != nil {
+			t.Fatalf("config with accounts[].upload.max_concurrent_uploads failed to load: %v (PERF-004)", err)
+		}
+		if cfg.Accounts[0].Upload.MaxConcurrentUploads != 2 {
+			t.Errorf("MaxConcurrentUploads = %d, want 2 (PERF-004)", cfg.Accounts[0].Upload.MaxConcurrentUploads)
+		}
+	})
+
+	t.Run("absent defaults to unlimited", func(t *testing.T) {
+		cfg, err := loadText(t, validYAML(testHash("printer-secret")), env)
+		if err != nil {
+			t.Fatalf("config without max_concurrent_uploads failed to load: %v", err)
+		}
+		if cfg.Accounts[0].Upload.MaxConcurrentUploads != 0 {
+			t.Errorf("MaxConcurrentUploads default = %d, want 0 (unlimited, PERF-004)", cfg.Accounts[0].Upload.MaxConcurrentUploads)
+		}
+	})
+
+	t.Run("negative rejected", func(t *testing.T) {
+		yamlText := strings.Replace(validYAML(testHash("printer-secret")),
+			"      max_size: 250MiB\n",
+			"      max_size: 250MiB\n      max_concurrent_uploads: -1\n",
+			1)
+		_, err := loadText(t, yamlText, env)
+		if err == nil {
+			t.Fatal("config with max_concurrent_uploads: -1 loaded cleanly, want validation error (PERF-004)")
+		}
+		if !strings.Contains(err.Error(), "max_concurrent_uploads") {
+			t.Errorf("validation error = %v, want it to mention max_concurrent_uploads (PERF-004)", err)
+		}
+	})
 }

@@ -1,0 +1,238 @@
+package main
+
+import (
+	"bytes"
+	"regexp"
+	"strings"
+	"testing"
+
+	"github.com/amamus/ocis-ftp-bridge/pkg/config"
+	"gopkg.in/yaml.v3"
+)
+
+// These tests guard docs/security.md against the documentation drift found in
+// the audit (QLT-004): bridge-configuration snippets must decode against the
+// real config schema with strict field validation (the same KnownFields(true)
+// the production loader uses), the operations port must be 9090 (9200 belongs
+// to oCIS), and the metric names referenced in the examples must exist.
+
+// configRootKeys are the top-level keys of the bridge configuration schema
+// (the yaml tags of config.Config).
+var configRootKeys = map[string]bool{
+	"server":        true,
+	"ocis":          true,
+	"spool":         true,
+	"accounts":      true,
+	"observability": true,
+	"http":          true,
+}
+
+// retiredConfigRootKeys are top-level keys that older documentation used for
+// the bridge configuration but that the schema never accepted. A yaml block
+// using one of these is a bridge-config snippet with the wrong root and must
+// fail the known-key check below (QLT-004).
+var retiredConfigRootKeys = map[string]bool{
+	"ftp": true,
+}
+
+// knownMetricNames are the Prometheus metric names exposed on /metrics
+// (pkg/http/server.go).
+var knownMetricNames = map[string]bool{
+	"ocis_ftp_sessions_total":                true,
+	"ocis_ftp_sessions_active":               true,
+	"ocis_ftp_uploads_total":                 true,
+	"ocis_ftp_uploads_failures_total":        true,
+	"ocis_ftp_uploads_bytes_total":           true,
+	"ocis_ftp_uploads_duration_seconds":      true,
+	"ocis_ftp_ocis_requests_total":           true,
+	"ocis_ftp_health_check_total":            true,
+	"ocis_ftp_health_check_duration_seconds": true,
+	"ocis_ftp_spool_size_bytes":              true,
+	"ocis_ftp_spool_file_count":              true,
+	"ocis_ftp_spool_capacity_bytes":          true,
+	"ocis_ftp_spool_usage_percent":           true,
+	"ocis_ftp_spool_capacity_exceeded_total": true,
+}
+
+// yamlFences extracts the contents of all yaml fenced code blocks from a
+// Markdown document, split into individual YAML documents.
+func yamlFences(t *testing.T, doc string) [][]byte {
+	t.Helper()
+	var docs [][]byte
+	var current []string
+	inYAML := false
+	flushBlock := func() {
+		if len(current) > 0 {
+			docs = append(docs, splitYAMLDocuments([]byte(strings.Join(current, "\n")))...)
+			current = nil
+		}
+	}
+	for _, line := range strings.Split(doc, "\n") {
+		if strings.HasPrefix(line, "```") {
+			if inYAML {
+				flushBlock()
+				inYAML = false
+			} else if strings.TrimSpace(line) == "```yaml" {
+				inYAML = true
+			}
+			continue
+		}
+		if inYAML {
+			current = append(current, line)
+		}
+	}
+	if inYAML {
+		flushBlock()
+	}
+	return docs
+}
+
+// TestSecurityDocConfigSnippets decodes every bridge-configuration YAML
+// snippet in docs/security.md against the real configuration schema with
+// strict field validation, so the documentation cannot drift from the keys
+// the loader actually accepts (QLT-004).
+func TestSecurityDocConfigSnippets(t *testing.T) {
+	doc := string(readRepoFile(t, "docs/security.md"))
+
+	checked := 0
+	for i, raw := range yamlFences(t, doc) {
+		var top map[string]any
+		if err := yaml.Unmarshal(raw, &top); err != nil {
+			t.Errorf("yaml block %d does not parse: %v", i, err)
+			continue
+		}
+		if len(top) == 0 {
+			continue
+		}
+		isBridgeConfig := false
+		for key := range top {
+			if configRootKeys[key] || retiredConfigRootKeys[key] {
+				isBridgeConfig = true
+				break
+			}
+		}
+		if !isBridgeConfig {
+			// docker-compose, Kubernetes, dependabot, ... snippets
+			continue
+		}
+		checked++
+		for key := range top {
+			if !configRootKeys[key] {
+				t.Errorf("yaml block %d uses unknown top-level key %q (known keys: server, ocis, spool, accounts, observability, http)", i, key)
+			}
+		}
+		cfg := config.New()
+		dec := yaml.NewDecoder(bytes.NewReader(raw))
+		dec.KnownFields(true)
+		if err := dec.Decode(cfg); err != nil {
+			t.Errorf("yaml block %d does not decode against the config schema: %v", i, err)
+		}
+	}
+	if checked == 0 {
+		t.Error("no bridge-configuration YAML snippets found in docs/security.md; the doc-test is not covering anything")
+	}
+}
+
+// TestSecurityDocOpsPort guards the stale port references from the audit:
+// 9200 is the oCIS port; the bridge operations server listens on 9090
+// (QLT-004).
+func TestSecurityDocOpsPort(t *testing.T) {
+	doc := string(readRepoFile(t, "docs/security.md"))
+	if strings.Contains(doc, "9200") {
+		t.Error("docs/security.md still references port 9200; the bridge operations port is 9090 (9200 belongs to oCIS)")
+	}
+}
+
+// TestSecurityDocMetricNames ensures every ocis_ftp_* metric referenced in
+// docs/security.md actually exists on /metrics (QLT-004).
+func TestSecurityDocMetricNames(t *testing.T) {
+	doc := string(readRepoFile(t, "docs/security.md"))
+	re := regexp.MustCompile(`ocis_ftp_[a-z_]+\*?`)
+	seen := map[string]bool{}
+	for _, name := range re.FindAllString(doc, -1) {
+		seen[name] = true
+		if strings.HasSuffix(name, "*") {
+			// Glob family reference (e.g. ocis_ftp_spool_*): valid when at
+			// least one known metric carries the prefix.
+			prefix := strings.TrimSuffix(name, "*")
+			found := false
+			for known := range knownMetricNames {
+				if strings.HasPrefix(known, prefix) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("docs/security.md references unknown metric family %q", name)
+			}
+			continue
+		}
+		if !knownMetricNames[name] {
+			t.Errorf("docs/security.md references unknown metric %q", name)
+		}
+	}
+	if len(seen) == 0 {
+		t.Error("docs/security.md references no ocis_ftp_* metrics; expected the metrics examples to be present")
+	}
+}
+
+// TestScalingDocsMultiReplica guards the multi-replica design documentation
+// (issue #71, QLT-010): docs/architecture.md must document the scaling model
+// (sessionAffinity, per-replica spool, per-instance limits) and reference the
+// ADR that records the decision, and docs/security.md must no longer advise
+// running a single replica.
+func TestScalingDocsMultiReplica(t *testing.T) {
+	doc := string(readRepoFile(t, "docs/architecture.md"))
+	for _, want := range []string{"sessionAffinity", "ClientIP", "emptyDir", "per-instance"} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("docs/architecture.md does not mention %q; the scaling section must document the multi-replica design (issue #71, QLT-010)", want)
+		}
+	}
+	if !strings.Contains(doc, "docs/adr/") {
+		t.Error("docs/architecture.md does not reference the ADR directory; the scaling decision must be recorded in an ADR (issue #71, QLT-010)")
+	}
+
+	adr := string(readRepoFile(t, "docs/adr/0001-multi-replica-scaling.md"))
+	for _, want := range []string{"sessionAffinity", "emptyDir", "per-instance"} {
+		if !strings.Contains(adr, want) {
+			t.Errorf("docs/adr/0001-multi-replica-scaling.md does not record %q; the ADR must document the multi-replica design decision (issue #71, QLT-010)", want)
+		}
+	}
+
+	sec := string(readRepoFile(t, "docs/security.md"))
+	if strings.Contains(sec, "run a single replica") {
+		t.Error("docs/security.md still advises running a single replica; the bridge is multi-replica safe with a per-replica emptyDir spool and sessionAffinity (issue #71, QLT-010)")
+	}
+}
+
+// TestSecurityDocActiveMode guards the SEC-005 documentation: the active FTP
+// mode flag and its residual risk must be documented in docs/security.md and
+// exposed in config.yaml.example.
+func TestSecurityDocActiveMode(t *testing.T) {
+	doc := string(readRepoFile(t, "docs/security.md"))
+	if !strings.Contains(doc, "allow_active_mode") {
+		t.Error("docs/security.md does not document server.allow_active_mode (SEC-005)")
+	}
+	if !strings.Contains(doc, "peer") {
+		t.Error("docs/security.md does not document the peer-IP match enforcement for data connections (SEC-005)")
+	}
+	example := string(readRepoFile(t, "config.yaml.example"))
+	if !strings.Contains(example, "allow_active_mode") {
+		t.Error("config.yaml.example does not expose server.allow_active_mode (SEC-005)")
+	}
+}
+
+// TestMakefileLdflagsTargetMainPackage guards QLT-006: the Makefile build
+// ldflags must target the version variables of the main package
+// (cmd/ocis-ftp-bridge), not the non-existent pkg/version package, so
+// `make build` actually stamps the binary version instead of silently
+// producing 1.0.0-dev/unknown.
+func TestMakefileLdflagsTargetMainPackage(t *testing.T) {
+	makefile := string(readRepoFile(t, "Makefile"))
+	if strings.Contains(makefile, "pkg/version") {
+		t.Error("Makefile ldflags still target the non-existent pkg/version package (QLT-006)")
+	}
+	if !strings.Contains(makefile, "-X main.Version=") {
+		t.Error("Makefile ldflags do not set main.Version (QLT-006)")
+	}
+}

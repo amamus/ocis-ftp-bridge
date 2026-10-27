@@ -117,10 +117,16 @@ RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 USER appuser
 ```
 
-- ✅ Container user: `appuser` (UID 1000)
-- ✅ Container group: `appgroup` (GID 1000)
+- ✅ Container user: `appuser` (system user created at image build time)
+- ✅ Container group: `appgroup`
 - ✅ No root privileges
-- ✅ Writable volumes owned by appuser
+- ✅ Writable directories owned by the container user
+
+Note: the Docker Compose and Kubernetes examples below override the user to
+`1000:1000` (`user:` / `runAsUser: 1000`). When you override the UID like
+this, every writable volume (spool, logs) must be owned by or group-writable
+to that UID/GID (in Kubernetes, `fsGroup`), or uploads fail with permission
+errors.
 
 #### Filesystem Permissions
 
@@ -128,7 +134,11 @@ USER appuser
 - Owner: `appuser:appgroup`
 - Permissions: `750` (owner: rwx, group: r-x, other: ---)
 - Subdirectories: `750`
-- Files: `640` (owner: rw-, group: r--, other: ---)
+- Files: `600` (owner: rw-, group: ---, other: ---)
+
+The spool manager creates directories with `0750` and files with `0600`, and
+re-applies `0600` when committing an upload, so spooled documents are never
+readable by other users on the host.
 
 **Configuration Files:**
 - Owner: `appuser:appgroup`
@@ -139,11 +149,13 @@ USER appuser
 
 **NEVER bake secrets into container images:**
 
-```yaml
+```dockerfile
 # ❌ BAD - Secrets in image
 FROM alpine:3.20
 COPY config-with-secrets.yaml /app/config.yaml
+```
 
+```yaml
 # ✅ GOOD - Secrets mounted at runtime
 volumes:
   - ./secrets:/app/secrets:ro
@@ -187,20 +199,36 @@ deploy:
 **Spool Configuration:**
 ```yaml
 spool:
-  directory: /var/spool/ocis-ftp
-  maxsize: 10737418240  # 10GB
-  cleanup_age_hours: 24
-  file_permissions: 0600
-  dir_permissions: 0700
+  # Directory for temporary upload storage (must be writable by the service)
+  directory: /var/spool/ocis-ftp-bridge
+
+  # Maximum total size of all files in the spool (prevents disk exhaustion)
+  max_total_size: 10GiB
+
+  # Spool usage monitoring, published as ocis_ftp_spool_* metrics on /metrics
+  monitoring:
+    enabled: true
+    warning_threshold: 80    # log a warning at 80% usage
+    critical_threshold: 95   # log a critical alert at 95% usage
+    check_interval: 30s
 ```
 
-**Per-Account Limits:**
+Files left in the spool by a previous run are removed at startup when they
+are older than 30 minutes.
+
+**Per-Account Upload Limits:**
 ```yaml
 accounts:
   - username: printer1
-    max_upload_size: 104857600  # 100MB
-    max_concurrent_uploads: 5
+    upload:
+      max_size: 100MiB  # maximum size of a single upload from this account
+      max_concurrent_uploads: 4  # max concurrent in-flight uploads (0 = unlimited)
 ```
+
+`max_concurrent_uploads` caps how many uploads one account may have in
+flight at the same time; further uploads are rejected with an error until a
+slot frees up. There is no per-account bandwidth limit; bound total
+concurrency with `server.max_connections` and `server.rate_limiting` below.
 
 ## Security Features
 
@@ -216,8 +244,11 @@ accounts:
 1. Paths must be relative to account root
 2. No absolute paths allowed
 3. No `..` components allowed
-4. No symlink following in spool directory
-5. Filename validation (no control characters, max length)
+4. Filename validation (no control characters, max length)
+
+The spool manager applies the same traversal checks to the local paths it
+writes: user IDs and target paths containing `..` are rejected, and the
+per-user spool directory is verified to stay inside the spool directory.
 
 **Examples:**
 ```
@@ -241,21 +272,20 @@ accounts:
 
 ### Symlink Handling
 
-**Security Measures:**
-- Spool manager disables symlink following
-- File operations use `O_NOFOLLOW` flag where supported
-- Directory creation rejects existing symlinks
-- Upload paths are validated to not contain symlinks
+The spool manager does not use `O_NOFOLLOW` and has no symlink-specific
+configuration; it relies on path validation instead:
 
-**Configuration:**
-```yaml
-spool:
-  # Disable symlink following
-  allow_symlinks: false  # Default: false
-  
-  # Reject files that are symlinks
-  reject_symlinks: true  # Default: true
-```
+- User IDs and target paths are rejected when they contain `..` (path
+  traversal).
+- The per-user spool directory is verified to stay inside the spool
+  directory (`filepath.Rel` containment check).
+- Temporary files are created with `os.CreateTemp` under the per-user
+  directory (server-generated names, not client-controlled filenames).
+
+Because of this, the spool directory must not be writable by untrusted local
+users: a local attacker who can plant a symlink inside the spool directory
+could redirect a write. Keep the spool directory owned by the service
+account with `0750` permissions, on a dedicated volume.
 
 ### Secret Redaction
 
@@ -284,29 +314,31 @@ log.Info("upload start",
 ### TLS Configuration
 
 **Recommended TLS Settings:**
+
+Explicit FTPS is configured under `server.tls` (TLS is enabled by default;
+plain FTP is insecure):
+
 ```yaml
-ftp:
+server:
   tls:
     enabled: true
-    cert_file: /etc/ssl/certs/ftp-bridge.crt
-    key_file: /etc/ssl/private/ftp-bridge.key
-    
-    # Modern TLS settings (default in Go)
-    min_version: TLS12  # Default: TLS12
-    cipher_suites: []  # Use Go defaults
-    
-    # Require TLS for all connections
-    required: true  # Reject plaintext connections
-    
-    # Client certificate verification (optional)
-    client_auth: require  # Optional: require client certs
-    client_ca_file: /etc/ssl/certs/ca.crt
+    cert: /etc/ssl/certs/ftp-bridge.crt   # PEM certificate
+    key: /etc/ssl/private/ftp-bridge.key    # PEM private key
 ```
 
+The certificate and key are loaded and validated at startup: both files must
+exist and form a matching PEM pair, the certificate must be currently valid,
+and the key must be strong (RSA 2048+ bits, ECDSA P-256/P-384/P-521, or
+Ed25519). A missing, expired, or weak-key certificate fails startup instead
+of surfacing on the first FTPS connection.
+
+There is no client-certificate authentication and no configurable minimum
+TLS version or cipher list: the Go TLS stack enforces TLS 1.2+ with modern
+default ciphers.
+
 **TLS Best Practices:**
-- Use TLS 1.2 or higher
-- Disable SSLv3, TLS 1.0, TLS 1.1
-- Use strong cipher suites (Go defaults are good)
+- Use TLS 1.2 or higher (enforced by the Go TLS stack)
+- Strong certificate keys (validated at startup, see above)
 - Certificate validity monitoring
 - Automatic certificate rotation
 
@@ -316,11 +348,11 @@ ftp:
 
 **Port Range:**
 ```yaml
-ftp:
+server:
   passive:
     min_port: 40000
     max_port: 40100
-    public_host: "ftp-bridge.example.com"
+    public_ip: "ftp-bridge.example.com"  # advertised address for NAT/container deployments
 ```
 
 **Firewall Rules:**
@@ -342,44 +374,53 @@ iptables -A INPUT -j DROP
 
 **Behind NAT:**
 ```yaml
-ftp:
+server:
   passive:
     min_port: 40000
     max_port: 40100
-    public_host: "public-ip.example.com"  # NAT public IP
+    public_ip: "public-ip.example.com"  # NAT public IP
 ```
 
 **Docker/Kubernetes:**
-- Use `public_host` to advertise external IP
-- Configure port forwarding for passive range
-- Test with `curl -v ftp://...` to verify passive IP
+- Use `public_ip` to advertise the external IP
+- Configure port forwarding for the passive range
+- Test with `curl -v ftp://...` to verify the passive IP
+
+#### Active FTP Mode (PORT/EPRT)
+
+Active mode is **enabled by default** because many printers only support
+PORT/EPRT. The bridge sets ftpserverlib's `IPMatchRequired` explicitly for
+both active and passive data connections: the server only ever dials the IP
+of the control-connection peer, never a third-party address, so classic
+FTP bounce attacks are not possible.
+
+Residual risk: in active mode the server opens an **outbound** connection
+to a client-chosen port on the client's own IP. Restrict egress with the
+firewall rules above, and disable active mode if no client needs it:
+
+```yaml
+server:
+  allow_active_mode: false   # Passive mode only
+```
 
 ### Rate Limiting and Connection Controls
 
-**Connection Limits:**
+**Connection and Authentication Limits:**
 ```yaml
 server:
-  max_connections: 100          # Total concurrent connections
-  max_per_ip: 10               # Max connections per IP
-  idle_timeout: 300            # Seconds of inactivity before disconnect
-  connection_timeout: 60       # Connection establishment timeout
+  max_connections: 100        # Total concurrent FTP connections
+  rate_limiting:
+    max_connections_per_ip: 10      # Max connections per IP
+    max_global_connections: 100     # Max connections overall (0 = unlimited)
+    max_auth_attempts_per_ip: 5     # Failed auth attempts per IP ...
+    auth_attempt_window: 1m         # ... within this window
+    auth_lockout_duration: 5m       # Lockout after exceeding the limit
+    track_failed_attempts: true    # Enable auth rate limiting (default: true)
 ```
 
-**Upload Rate Limiting:**
-```yaml
-accounts:
-  - username: printer1
-    max_upload_size: 104857600   # 100MB
-    max_concurrent_uploads: 5   # Max simultaneous uploads per account
-    rate_limit_bytes_per_sec: 10485760  # 10MB/s
-```
-
-**Global Limits:**
-```yaml
-server:
-  max_total_uploads: 50       # Max concurrent uploads across all accounts
-  max_bandwidth_mbps: 100     # Total bandwidth limit
-```
+Per-account limits are configured under `accounts[].upload`: `max_size`
+bounds a single upload and `max_concurrent_uploads` bounds concurrent
+in-flight uploads (0 = unlimited). There is no per-account bandwidth limit.
 
 ## Security Hardening Checklist
 
@@ -393,7 +434,11 @@ server:
 - [ ] Spool directory has correct permissions (750)
 - [ ] Container runs as non-root user
 - [ ] Resource limits configured appropriately
-- [ ] Health/readiness/metrics endpoints secured
+- [ ] Operations endpoints secured: `/readyz` and `/metrics` require
+  authentication (`http.auth` is enabled by default and a random password is
+  generated and logged when `http.auth.password` is unset); `/healthz` stays
+  unauthenticated for probes; the operations server binds to
+  `127.0.0.1:9090` by default
 - [ ] Log aggregation configured without sensitive data
 
 ### Runtime
@@ -426,7 +471,9 @@ server:
 
 2. **Spool Exhaustion**
    - Attacker could fill spool directory
-   - MITIGATION: Size limits and quotas
+   - MITIGATION: `spool.max_total_size` capacity enforcement, per-account
+     `upload.max_size` limits, and spool usage metrics (`ocis_ftp_spool_*`)
+     for alerting
 
 3. **Path Traversal**
    - Malicious paths could access unauthorized files
@@ -434,7 +481,10 @@ server:
 
 4. **Memory Exhaustion**
    - Large uploads could consume memory
-   - MITIGATION: Streaming uploads, no in-memory buffering
+   - MITIGATION: Uploads stream from the FTP data connection to the spool in
+     chunks and from the spool file to WebDAV; a file is never read fully
+     into memory. Disk usage is bounded by `spool.max_total_size` and
+     per-account `upload.max_size` limits.
 
 5. **Connection Flooding**
    - Attacker could open many connections
@@ -494,7 +544,10 @@ services:
     ports:
       - "2121:2121"           # FTP control
       - "40000-40100:40000-40100"  # FTP passive range
-      - "127.0.0.1:9200:9200" # HTTP metrics (local only)
+      # The HTTP operations port (9090) is NOT published: the ops endpoints
+      # (/readyz, /metrics) require basic auth, and the bridge must not share
+      # a port with oCIS. Publish "127.0.0.1:9090:9090" only if you need
+      # host access.
     
     # Volume mounts
     volumes:
@@ -526,7 +579,7 @@ services:
     
     # Health checks
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9200/healthz"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/healthz"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -561,7 +614,10 @@ metadata:
   labels:
     app: ocis-ftp-bridge
 spec:
-  replicas: 2
+  # Replica count is managed by the HPA. Multi-replica is safe: the spool
+  # is a per-replica emptyDir and the FTP Service pins sessions with
+  # sessionAffinity: ClientIP (docs/adr/0001-multi-replica-scaling.md).
+  replicas: 1
   selector:
     matchLabels:
       app: ocis-ftp-bridge
@@ -593,8 +649,8 @@ spec:
         ports:
         - containerPort: 2121
           name: ftp
-        - containerPort: 9200
-          name: http-metrics
+        - containerPort: 9090
+          name: http
         
         # Resource limits
         resources:
@@ -605,11 +661,17 @@ spec:
             cpu: "500m"
             memory: "256Mi"
         
-        # Liveness/Readiness probes
+        # Liveness/Readiness probes against the operations port (9090).
+        # /readyz requires authentication when http.auth is enabled (the
+        # default), and kubelet httpGet probes cannot send credentials; this
+        # example therefore probes /healthz for liveness. For readiness,
+        # either disable http.auth on the cluster-internal operations port
+        # (as the shipped kubernetes/deployment.yaml does) or probe /healthz
+        # and check readiness externally.
         livenessProbe:
           httpGet:
             path: /healthz
-            port: 9200
+            port: http
           initialDelaySeconds: 10
           periodSeconds: 30
           timeoutSeconds: 5
@@ -617,8 +679,8 @@ spec:
         
         readinessProbe:
           httpGet:
-            path: /readyz
-            port: 9200
+            path: /healthz
+            port: http
           initialDelaySeconds: 5
           periodSeconds: 10
           timeoutSeconds: 3
@@ -650,9 +712,10 @@ spec:
       - name: config
         configMap:
           name: ftp-bridge-config
+      # Per-replica spool: uploads are pushed to oCIS within the session,
+      # so the spool never needs sharing between replicas.
       - name: spool
-        persistentVolumeClaim:
-          claimName: ftp-bridge-spool
+        emptyDir: {}
       - name: secrets
         secret:
           secretName: ftp-bridge-secrets
@@ -696,6 +759,9 @@ metadata:
   name: ocis-ftp-bridge-ftp
 spec:
   type: ClusterIP
+  # FTP sessions are long-lived; pin each client to one pod so control and
+  # passive data connections stay together in multi-replica operation.
+  sessionAffinity: ClientIP
   selector:
     app: ocis-ftp-bridge
   ports:
@@ -720,8 +786,8 @@ spec:
     app: ocis-ftp-bridge
   ports:
   - name: http
-    port: 9200
-    targetPort: 9200
+    port: 9090
+    targetPort: 9090
     protocol: TCP
 ```
 
@@ -788,16 +854,23 @@ grep "Upload.*size" /var/log/ftp-bridge.log | awk '{print $1, $2, $4}' | sort -k
 
 ### Metrics Analysis
 
-**Connection Metrics:**
+**Metrics:**
+
+`/metrics` requires authentication when `http.auth` is enabled (the default);
+pass the generated or configured credentials with `-u`:
+
 ```bash
 # Active FTP sessions
-curl http://localhost:9200/metrics | grep ocis_ftp_sessions_active
+curl -u admin:<password> http://localhost:9090/metrics | grep ocis_ftp_sessions_active
 
 # Upload failures
-curl http://localhost:9200/metrics | grep ocis_ftp_upload_failures
+curl -u admin:<password> http://localhost:9090/metrics | grep ocis_ftp_uploads_failures_total
 
 # oCIS request errors
-curl http://localhost:9200/metrics | grep ocis_requests_total{status="5xx"}
+curl -u admin:<password> http://localhost:9090/metrics | grep ocis_ftp_ocis_requests_total
+
+# Spool usage (see spool.monitoring)
+curl -u admin:<password> http://localhost:9090/metrics | grep ocis_ftp_spool_usage_percent
 ```
 
 ## Software Bill of Materials (SBOM)

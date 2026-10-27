@@ -5,19 +5,23 @@
 //
 //	hash-password <password>
 //	hash-password -m 65536 -t 3 -p 4 <password>
+//	hash-password            # reads the password from stdin
 //
 // The generated hash can be placed in the password_hash field of an account
-// in the configuration file. The plaintext password is read from the argument
-// and never logged.
+// in the configuration file. The plaintext password is never logged. Prefer
+// passing it via stdin over an argument: command-line arguments are visible
+// in the process list and shell history (SEC-013).
 package main
 
 import (
+	"bufio"
 	"crypto/rand"
 	"encoding/base64"
 	"flag"
 	"fmt"
 	"math"
 	"os"
+	"strings"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -30,13 +34,25 @@ func main() {
 	saltLen := flag.Uint("s", 16, "Salt length in bytes")
 	flag.Parse()
 
-	if flag.NArg() != 1 {
-		fmt.Fprintf(os.Stderr, "Usage: %s [flags] <password>\n", os.Args[0])
+	if flag.NArg() > 1 {
+		fmt.Fprintf(os.Stderr, "Usage: %s [flags] [password]\n", os.Args[0])
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
 
+	// Read the password from the argument, or from stdin when no argument is
+	// given so it does not end up in the process list or shell history
+	// (SEC-013).
 	password := flag.Arg(0)
+	if password == "" && flag.NArg() == 0 {
+		fmt.Fprintln(os.Stderr, "Enter password:")
+		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil && line == "" {
+			fmt.Fprintf(os.Stderr, "Error: failed to read password from stdin: %v\n", err)
+			os.Exit(1)
+		}
+		password = strings.TrimRight(line, "\r\n")
+	}
 	if password == "" {
 		fmt.Fprintln(os.Stderr, "Error: password must not be empty")
 		os.Exit(1)

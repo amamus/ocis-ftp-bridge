@@ -43,6 +43,11 @@ CONTRIBUTING.md
 *.log
 logs/
 
+# Local build output (gitignored) and generated SBOM documents: keep the
+# ~18 MB repo-root binary and the SBOM files out of the build context (QLT-007)
+/ocis-ftp-bridge
+/sbom.*.json
+
 # Temporary files
 tmp/
 *~

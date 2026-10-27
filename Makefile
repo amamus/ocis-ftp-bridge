@@ -3,7 +3,7 @@
 PKG := github.com/amamus/ocis-ftp-bridge
 VERSION ?= dev
 DATE := $(shell date +%Y-%m-%dT%H:%M:%SZ)
-LDFLAGS := -X $(PKG)/pkg/version.Version=$(VERSION) -X $(PKG)/pkg/version.BuildDate=$(DATE)
+LDFLAGS := -X main.Version=$(VERSION) -X main.CommitSHA=$(shell git rev-parse --short HEAD) -X main.BuildDate=$(DATE)
 
 build:
 	@echo "Building ocis-ftp-bridge..."
