@@ -149,6 +149,11 @@ jobs:
 
         http:
           address: "0.0.0.0:${{ env.HTTP_PORT }}"
+          auth:
+            enabled: true
+            method: basic
+            username: admin
+            password: "e2e-test-password"
 
         spool:
           directory: /tmp/ocis-ftp-bridge-spool
@@ -226,11 +231,37 @@ jobs:
         			
         			switch r.Method {
         			case "MKCOL":
-        				os.MkdirAll(fullPath, 0755)
+        				// MKCOL is not recursive: an existing resource gets 405 and a
+        				// missing parent collection gets 409 (never a silent MkdirAll)
+        				if _, err := os.Stat(fullPath); err == nil {
+        					w.WriteHeader(http.StatusMethodNotAllowed)
+        					return
+        				}
+        				if info, err := os.Stat(filepath.Dir(fullPath)); err != nil || !info.IsDir() {
+        					w.WriteHeader(http.StatusConflict)
+        					return
+        				}
+        				if err := os.Mkdir(fullPath, 0755); err != nil {
+        					http.Error(w, err.Error(), http.StatusInternalServerError)
+        					return
+        				}
         				w.WriteHeader(http.StatusCreated)
         				
         			case "PUT":
-        				os.MkdirAll(filepath.Dir(fullPath), 0755)
+        				// A real WebDAV server does not create parent collections
+        				// implicitly: PUT into a missing parent fails with 404.
+        				if info, err := os.Stat(filepath.Dir(fullPath)); err != nil || !info.IsDir() {
+        					w.WriteHeader(http.StatusNotFound)
+        					return
+        				}
+        				// The bridge sends If-None-Match: * for non-overwriting
+        				// uploads; a real server answers 412 when the target exists.
+        				if r.Header.Get("If-None-Match") == "*" {
+        					if _, err := os.Stat(fullPath); err == nil {
+        						w.WriteHeader(http.StatusPreconditionFailed)
+        						return
+        					}
+        				}
         				data, err := io.ReadAll(r.Body)
         				if err != nil {
         					http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -376,7 +407,8 @@ jobs:
         # Test 3: Health and readiness endpoints
         echo "=== Test 3: Health and readiness endpoints ==="
         health_response=$(wget -q -O- http://localhost:${{ env.HTTP_PORT }}/healthz)
-        ready_response=$(wget -q -O- http://localhost:${{ env.HTTP_PORT }}/readyz)
+        ready_response=$(curl -sS -u admin:e2e-test-password http://localhost:${{ env.HTTP_PORT }}/readyz)
+        unauth_code=$(curl -sS -o /dev/null -w "%{http_code}" http://localhost:${{ env.HTTP_PORT }}/readyz)
         
         if echo "$health_response" | grep -q '"status":"live"' && echo "$ready_response" | grep -q '"status":"ready"'; then
           echo "PASS: Test 3 - Health and readiness endpoints responding"
@@ -385,13 +417,113 @@ jobs:
           exit 1
         fi
         
+        if [ "$unauth_code" = "401" ]; then
+          echo "PASS: Test 3 - /readyz rejects unauthenticated requests"
+        else
+          echo "FAIL: Test 3 - /readyz without credentials = $unauth_code, want 401"
+          exit 1
+        fi
+        
         # Test 4: Metrics endpoint
         echo "=== Test 4: Metrics endpoint ==="
-        metrics_response=$(wget -q -O- http://localhost:${{ env.HTTP_PORT }}/metrics)
+        metrics_response=$(curl -sS -u admin:e2e-test-password http://localhost:${{ env.HTTP_PORT }}/metrics)
         if echo "$metrics_response" | grep -q "ocis_ftp"; then
           echo "PASS: Test 4 - Metrics endpoint returning ocis_ftp metrics"
         else
           echo "FAIL: Test 4 - Metrics endpoint not returning expected metrics"
+          exit 1
+        fi
+        
+        # Test 5: Nested path upload creates the parent collections in WebDAV
+        echo "=== Test 5: Nested path upload ==="
+        cat > nested-file.txt << 'EOF'
+        Nested upload test content.
+        EOF
+        
+        echo -e "open -u test-printer,test-password -p ${{ env.FTP_PORT }} localhost
+        put nested-file.txt -o /uploads/nested/a/b/nested-file.txt
+        quit" | lftp -e "set ftp:ssl-force false;" 2>&1 | tee ftp-test-5.log
+        
+        if wget -q http://localhost:9200/webdav/uploads/nested/a/b/nested-file.txt -O /tmp/received-nested.txt; then
+          if diff -q nested-file.txt /tmp/received-nested.txt > /dev/null 2>&1; then
+            echo "PASS: Test 5 - Nested file content matches"
+          else
+            echo "FAIL: Test 5 - Nested file content does not match"
+            exit 1
+          fi
+        else
+          echo "FAIL: Test 5 - Nested file was not uploaded to mock server"
+          exit 1
+        fi
+        
+        # Test 6: rename collision policy stores both uploads
+        echo "=== Test 6: Rename collision policy ==="
+        cat > rename-1.txt << 'EOF'
+        First version content for rename test.
+        EOF
+        cat > rename-2.txt << 'EOF'
+        Second version content for rename test, different.
+        EOF
+        
+        echo -e "open -u test-printer,test-password -p ${{ env.FTP_PORT }} localhost
+        put rename-1.txt -o /uploads/rename-test.txt
+        put rename-2.txt -o /uploads/rename-test.txt
+        quit" | lftp -e "set ftp:ssl-force false;" 2>&1 | tee ftp-test-6.log
+        
+        file_count=$(find /tmp/mock-ocis-uploads/uploads -maxdepth 1 -name 'rename-test*' -type f | wc -l)
+        if [ "$file_count" -eq 2 ]; then
+          echo "PASS: Test 6 - Both uploads stored (original plus renamed copy)"
+        else
+          echo "FAIL: Test 6 - Expected 2 files matching rename-test*, found $file_count"
+          exit 1
+        fi
+        
+        if wget -q http://localhost:9200/webdav/uploads/rename-test.txt -O /tmp/received-rename.txt; then
+          if diff -q rename-1.txt /tmp/received-rename.txt > /dev/null 2>&1; then
+            echo "PASS: Test 6 - Original file keeps the first upload content"
+          else
+            echo "FAIL: Test 6 - Original file content does not match first upload"
+            exit 1
+          fi
+        else
+          echo "FAIL: Test 6 - Original file was not uploaded to mock server"
+          exit 1
+        fi
+        
+        # Test 7: reject collision policy keeps the first upload only
+        echo "=== Test 7: Reject collision policy ==="
+        cat > reject-1.txt << 'EOF'
+        First version content for reject test.
+        EOF
+        cat > reject-2.txt << 'EOF'
+        Second version content for reject test, different.
+        EOF
+        
+        echo -e "open -u test-printer-2,test-password-2 -p ${{ env.FTP_PORT }} localhost
+        put reject-1.txt -o /uploads/reject-test.txt
+        put reject-2.txt -o /uploads/reject-test.txt
+        quit" | lftp -e "set ftp:ssl-force false;" 2>&1 | tee ftp-test-7.log || true
+        # The second put is expected to fail (reject policy), which makes lftp
+        # exit non-zero; || true keeps pipefail from aborting the step. The
+        # assertions below are the real verification.
+        
+        file_count=$(find /tmp/mock-ocis-uploads/uploads -maxdepth 1 -name 'reject-test*' -type f | wc -l)
+        if [ "$file_count" -eq 1 ]; then
+          echo "PASS: Test 7 - Only the first upload was stored"
+        else
+          echo "FAIL: Test 7 - Expected 1 file matching reject-test*, found $file_count"
+          exit 1
+        fi
+        
+        if wget -q http://localhost:9200/webdav/uploads/reject-test.txt -O /tmp/received-reject.txt; then
+          if diff -q reject-1.txt /tmp/received-reject.txt > /dev/null 2>&1; then
+            echo "PASS: Test 7 - Stored file keeps the first upload content"
+          else
+            echo "FAIL: Test 7 - Stored file content does not match first upload"
+            exit 1
+          fi
+        else
+          echo "FAIL: Test 7 - File was not uploaded to mock server"
           exit 1
         fi
         
@@ -428,7 +560,7 @@ jobs:
         rm -rf /tmp/ocis-ftp-bridge-spool
         rm -rf /tmp/mock-ocis-uploads
         rm -f mock-ocis mock-ocis.go
-        rm -f test-file.txt test-config.yaml
+        rm -f test-file.txt nested-file.txt rename-1.txt rename-2.txt reject-1.txt reject-2.txt test-config.yaml
         rm -f ftp-test-*.log
         
       if: always()

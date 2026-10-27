@@ -31,12 +31,6 @@ func TestNewManager(t *testing.T) {
 	// Test GetUploadManager
 	uploadManager := manager.GetUploadManager()
 	require.NotNil(t, uploadManager)
-
-	// Test GetUsage
-	used, capacity, err := manager.GetUsage()
-	require.NoError(t, err)
-	assert.Equal(t, uint64(0), used)
-	assert.Equal(t, uint64(1024*1024), capacity)
 }
 
 func TestNewManager_InvalidDirectory(t *testing.T) {
@@ -512,34 +506,6 @@ func TestGetFileRef(t *testing.T) {
 	assert.Equal(t, ErrFileNotFound, err)
 }
 
-func TestGetUsage(t *testing.T) {
-	t.Parallel()
-
-	tempDir, err := os.MkdirTemp("", "spool-test")
-	require.NoError(t, err)
-	defer os.RemoveAll(tempDir)
-
-	manager, err := NewManager(tempDir, 1024*1024)
-	require.NoError(t, err)
-
-	// Initially should be 0 usage
-	used, capacity, err := manager.GetUsage()
-	require.NoError(t, err)
-	assert.Equal(t, uint64(0), used)
-	assert.Equal(t, uint64(1024*1024), capacity)
-
-	// Store some files
-	_, err = manager.Store("testuser", "file1.txt", []byte("data1"))
-	require.NoError(t, err)
-	_, err = manager.Store("testuser", "file2.txt", []byte("data2data2"))
-	require.NoError(t, err)
-
-	// Check usage
-	used, _, err = manager.GetUsage()
-	require.NoError(t, err)
-	assert.Equal(t, uint64(15), used) // 5 + 10 bytes (data1 + data2data2)
-}
-
 func TestUploadManager(t *testing.T) {
 	t.Parallel()
 
@@ -989,4 +955,180 @@ func TestUploadFlow_UnknownSize(t *testing.T) {
 	spooled, err := os.ReadFile(fileRef.Path)
 	require.NoError(t, err)
 	assert.Equal(t, data, spooled)
+}
+
+// TestUploadManager_GlobalCapacityEnforced verifies that spool.max_total_size
+// is enforced against actual bytes written (SEC-002): FTP uploads start with
+// an unknown size, so the StartUpload reservation is zero and the WriteChunk
+// path must reject chunks that would exceed the global capacity.
+func TestUploadManager_GlobalCapacityEnforced(t *testing.T) {
+	t.Parallel()
+
+	tempDir, err := os.MkdirTemp("", "spool-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	manager, err := NewManager(tempDir, 1000)
+	require.NoError(t, err)
+
+	uploadManager := manager.GetUploadManager()
+	ctx := context.Background()
+
+	// First upload writes 600 bytes with unknown total size (like FTP STOR).
+	// The account limit is above the global capacity so the global limit is
+	// the binding constraint.
+	first, err := uploadManager.StartUpload(ctx, "testuser", "first.txt", "/target", -1, 10000)
+	require.NoError(t, err)
+	_, err = uploadManager.WriteChunk(first, make([]byte, 600))
+	require.NoError(t, err)
+
+	// Second upload starts fine (unknown size reserves nothing) but must be
+	// rejected once its chunks would exceed the remaining 400 bytes
+	second, err := uploadManager.StartUpload(ctx, "testuser", "second.txt", "/target", -1, 10000)
+	require.NoError(t, err)
+
+	_, err = uploadManager.WriteChunk(second, make([]byte, 500))
+	assert.Equal(t, ErrSpoolCapacityExceeded, err)
+
+	// Exactly filling the remaining capacity is allowed (1000 == 1000)
+	_, err = uploadManager.WriteChunk(second, make([]byte, 400))
+	require.NoError(t, err)
+
+	// One more byte over the limit is rejected
+	_, err = uploadManager.WriteChunk(second, make([]byte, 1))
+	assert.Equal(t, ErrSpoolCapacityExceeded, err)
+
+	require.NoError(t, uploadManager.AbortUpload(first))
+	require.NoError(t, uploadManager.AbortUpload(second))
+}
+
+// TestUploadManager_CapacityReleasedOnFinishAndAbort verifies that accounted
+// spool bytes are released when an upload finishes or is aborted (SEC-002),
+// so later uploads can use the freed capacity.
+func TestUploadManager_CapacityReleasedOnFinishAndAbort(t *testing.T) {
+	t.Parallel()
+
+	tempDir, err := os.MkdirTemp("", "spool-test")
+	require.NoError(t, err)
+	defer os.RemoveAll(tempDir)
+
+	manager, err := NewManager(tempDir, 1000)
+	require.NoError(t, err)
+
+	uploadManager := manager.GetUploadManager()
+	ctx := context.Background()
+
+	// The account limit is above the global capacity so the global limit is
+	// the binding constraint.
+	start := func(name string) *Upload {
+		upload, err := uploadManager.StartUpload(ctx, "testuser", name, "/target", -1, 10000)
+		require.NoError(t, err)
+		return upload
+	}
+
+	// Fill the spool with two active uploads: 600 + 400 = 1000
+	a := start("a.txt")
+	_, err = uploadManager.WriteChunk(a, make([]byte, 600))
+	require.NoError(t, err)
+	b := start("b.txt")
+	_, err = uploadManager.WriteChunk(b, make([]byte, 400))
+	require.NoError(t, err)
+
+	// No room for another upload while both are active
+	c := start("c.txt")
+	_, err = uploadManager.WriteChunk(c, make([]byte, 1))
+	assert.Equal(t, ErrSpoolCapacityExceeded, err)
+	require.NoError(t, uploadManager.AbortUpload(c))
+
+	// Finishing A releases its 600 bytes: 400 (B) + 600 (D) fits exactly
+	_, err = uploadManager.FinishUpload(a)
+	require.NoError(t, err)
+	d := start("d.txt")
+	_, err = uploadManager.WriteChunk(d, make([]byte, 600))
+	require.NoError(t, err)
+
+	// Aborting D releases its bytes again: with B's 400 bytes still held,
+	// E can write exactly the remaining 600 bytes
+	require.NoError(t, uploadManager.AbortUpload(d))
+	e := start("e.txt")
+	_, err = uploadManager.WriteChunk(e, make([]byte, 600))
+	require.NoError(t, err)
+	_, err = uploadManager.WriteChunk(e, make([]byte, 1))
+	assert.Equal(t, ErrSpoolCapacityExceeded, err)
+
+	require.NoError(t, uploadManager.AbortUpload(b))
+	require.NoError(t, uploadManager.AbortUpload(e))
+}
+
+// TestUploadManagerCurrentUsage verifies the running usage counters (PERF-003):
+// bytes and the active-upload count track chunk writes and are released when
+// the upload finishes or is aborted.
+func TestUploadManagerCurrentUsage(t *testing.T) {
+	t.Parallel()
+
+	uploadManager := NewUploadManager(t.TempDir(), 1024*1024)
+	ctx := context.Background()
+
+	used, active := uploadManager.CurrentUsage()
+	assert.Zero(t, used)
+	assert.Zero(t, active)
+
+	upload, err := uploadManager.StartUpload(ctx, "testuser", "testfile.txt", "/target", -1, 1024*1024)
+	require.NoError(t, err)
+
+	used, active = uploadManager.CurrentUsage()
+	assert.Zero(t, used)
+	assert.Equal(t, 1, active)
+
+	_, err = uploadManager.WriteChunk(upload, []byte("1234567890"))
+	require.NoError(t, err)
+
+	used, active = uploadManager.CurrentUsage()
+	assert.Equal(t, uint64(10), used)
+	assert.Equal(t, 1, active)
+
+	// A second concurrent upload adds to the counters
+	upload2, err := uploadManager.StartUpload(ctx, "testuser", "other.txt", "/target", -1, 1024*1024)
+	require.NoError(t, err)
+	_, err = uploadManager.WriteChunk(upload2, []byte("12345"))
+	require.NoError(t, err)
+
+	used, active = uploadManager.CurrentUsage()
+	assert.Equal(t, uint64(15), used)
+	assert.Equal(t, 2, active)
+
+	// Finishing the first upload releases its bytes
+	_, err = uploadManager.FinishUpload(upload)
+	require.NoError(t, err)
+	used, active = uploadManager.CurrentUsage()
+	assert.Equal(t, uint64(5), used)
+	assert.Equal(t, 1, active)
+
+	// Aborting the second upload releases its bytes
+	require.NoError(t, uploadManager.AbortUpload(upload2))
+	used, active = uploadManager.CurrentUsage()
+	assert.Zero(t, used)
+	assert.Zero(t, active)
+}
+
+// TestManagerCurrentUsage verifies the Manager exposes the running usage
+// counters of its upload manager (PERF-003).
+func TestManagerCurrentUsage(t *testing.T) {
+	t.Parallel()
+
+	mgr, err := NewManager(t.TempDir(), 1024*1024)
+	require.NoError(t, err)
+
+	used, count := mgr.CurrentUsage()
+	assert.Zero(t, used)
+	assert.Zero(t, count)
+
+	upload, err := mgr.GetUploadManager().StartUpload(context.Background(), "testuser", "f.txt", "/target", -1, 1024*1024)
+	require.NoError(t, err)
+	_, err = mgr.GetUploadManager().WriteChunk(upload, []byte("hello"))
+	require.NoError(t, err)
+
+	used, count = mgr.CurrentUsage()
+	assert.Equal(t, uint64(5), used)
+	assert.Equal(t, uint64(1), count)
 }

@@ -9,12 +9,17 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	pathpkg "path"
 	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,8 +27,10 @@ import (
 	"golang.org/x/crypto/argon2"
 
 	"github.com/amamus/ocis-ftp-bridge/pkg/config"
+	"github.com/amamus/ocis-ftp-bridge/pkg/errors"
 	"github.com/amamus/ocis-ftp-bridge/pkg/observability"
 	"github.com/amamus/ocis-ftp-bridge/pkg/spool"
+	"github.com/amamus/ocis-ftp-bridge/pkg/webdav"
 )
 
 // noopObs is a no-op observability.Client for tests.
@@ -121,7 +128,7 @@ func TestAuthUserDisconnectCancelsSessionContext(t *testing.T) {
 		},
 	}
 
-	d := NewBridgeDriver(cfg, noopObs{}, nil, nil)
+	d := NewBridgeDriver(cfg, noopObs{}, nil)
 
 	cc := &mockClientContext{
 		id:   42,
@@ -167,7 +174,7 @@ func TestAuthUserDisconnectCancelsSessionContext(t *testing.T) {
 // that never authenticated (or was already removed) is a no-op.
 func TestClientDisconnectedUnknownClient(t *testing.T) {
 	cfg := config.New()
-	d := NewBridgeDriver(cfg, noopObs{}, nil, nil)
+	d := NewBridgeDriver(cfg, noopObs{}, nil)
 
 	cc := &mockClientContext{
 		id:   99,
@@ -181,6 +188,69 @@ func TestClientDisconnectedUnknownClient(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_ = ctx
+}
+
+// TestConnectionCounterBalancedAcrossSessions is a regression test for
+// SEC-004: activeConnections was incremented in both ClientConnected and
+// AuthUser but decremented only once in ClientDisconnected, so the counter
+// leaked +1 per authenticated session. After max_connections cumulative
+// logins every new login was rejected with "server connection limit
+// reached" until the server restarted.
+func TestConnectionCounterBalancedAcrossSessions(t *testing.T) {
+	// Mock graph server that resolves the account's drive
+	graphSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"test-drive-id","name":"Test Drive","driveType":"personal","webUrl":"http://localhost/webdav"}`))
+	}))
+	defer graphSrv.Close()
+
+	cfg := config.New()
+	cfg.OCIS.GraphURL = graphSrv.URL
+	cfg.Server.MaxConnections = 5
+	cfg.Accounts = []config.AccountConfig{
+		{
+			Username:     "test-printer",
+			PasswordHash: testPasswordHash(t, "test-password"),
+			OCIS: config.AccountOCISConfig{
+				Username:    "test-printer",
+				AppTokenEnv: "TEST_PRINTER_APP_TOKEN",
+			},
+			Target: config.TargetConfig{
+				DriveID: "test-drive-id",
+				Root:    "/",
+			},
+			Upload: config.UploadConfig{
+				CollisionPolicy: "rename",
+				MaxSize:         1024 * 1024,
+			},
+			AppToken: "test-token",
+		},
+	}
+
+	d := NewBridgeDriver(cfg, noopObs{}, nil)
+
+	// Run more cumulative login cycles than max_connections: with the
+	// counter leak, logins beyond the 5th are rejected with "server
+	// connection limit reached".
+	const cycles = 8
+	for i := 1; i <= cycles; i++ {
+		cc := &mockClientContext{
+			id:   uint32(i),
+			addr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12345},
+		}
+
+		if _, err := d.ClientConnected(cc); err != nil {
+			t.Fatalf("cycle %d: ClientConnected failed: %v", i, err)
+		}
+		if _, err := d.AuthUser(cc, "test-printer", "test-password"); err != nil {
+			t.Fatalf("cycle %d: AuthUser failed: %v", i, err)
+		}
+		d.ClientDisconnected(cc)
+
+		if got := atomic.LoadInt64(&d.activeConnections); got != 0 {
+			t.Fatalf("cycle %d: activeConnections = %d after disconnect, want 0 (counter leaks +1 per session)", i, got)
+		}
+	}
 }
 
 // generateSelfSignedCert creates a self-signed certificate and key in PEM format.
@@ -222,7 +292,7 @@ func TestGetTLSConfig(t *testing.T) {
 	t.Run("TLS disabled returns error", func(t *testing.T) {
 		cfg := config.New()
 		cfg.Server.TLS.Enabled = false
-		d := NewBridgeDriver(cfg, noopObs{}, nil, nil)
+		d := NewBridgeDriver(cfg, noopObs{}, nil)
 
 		tlsConfig, err := d.GetTLSConfig()
 		if err == nil {
@@ -249,7 +319,7 @@ func TestGetTLSConfig(t *testing.T) {
 		cfg.Server.TLS.Enabled = true
 		cfg.Server.TLS.Cert = certFile
 		cfg.Server.TLS.Key = keyFile
-		d := NewBridgeDriver(cfg, noopObs{}, nil, nil)
+		d := NewBridgeDriver(cfg, noopObs{}, nil)
 
 		tlsConfig, err := d.GetTLSConfig()
 		if err != nil {
@@ -265,7 +335,7 @@ func TestGetTLSConfig(t *testing.T) {
 		cfg.Server.TLS.Enabled = true
 		cfg.Server.TLS.Cert = filepath.Join(t.TempDir(), "nonexistent-cert.pem")
 		cfg.Server.TLS.Key = filepath.Join(t.TempDir(), "nonexistent-key.pem")
-		d := NewBridgeDriver(cfg, noopObs{}, nil, nil)
+		d := NewBridgeDriver(cfg, noopObs{}, nil)
 
 		if _, err := d.GetTLSConfig(); err == nil {
 			t.Fatal("expected error for missing certificate")
@@ -284,7 +354,12 @@ func TestHandleUploadOpenPathMapping(t *testing.T) {
 		t.Fatalf("failed to create spool manager: %v", err)
 	}
 
+	// The driver resolves collisions against the WebDAV backend, so point the
+	// config at a mock with real 404 semantics.
+	mock := newMockWebDAVServer(t, nil)
+
 	cfg := config.New()
+	cfg.OCIS.WebDAVURL = mock.URL + "/webdav"
 	cfg.Accounts = []config.AccountConfig{
 		{
 			Username: "test-printer",
@@ -292,7 +367,7 @@ func TestHandleUploadOpenPathMapping(t *testing.T) {
 			Upload:   config.UploadConfig{CollisionPolicy: "rename", MaxSize: 1024 * 1024},
 		},
 	}
-	d := NewBridgeDriver(cfg, noopObs{}, spoolManager, nil)
+	d := NewBridgeDriver(cfg, noopObs{}, spoolManager)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -301,7 +376,6 @@ func TestHandleUploadOpenPathMapping(t *testing.T) {
 		bridgeDriver: d,
 		account:      &cfg.Accounts[0],
 		user:         "test-printer",
-		currentDir:   "/",
 		spoolUploads: make(map[string]*spoolUpload),
 		context:      ctx,
 		cancel:       cancel,

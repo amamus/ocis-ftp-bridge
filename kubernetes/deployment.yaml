@@ -6,6 +6,13 @@
 # Usage:
 #   kubectl apply -f kubernetes/
 #
+# Prerequisites:
+#   The example enables explicit FTPS (AUTH TLS). Create the TLS Secret
+#   before applying:
+#     kubectl create namespace ocis-ftp-bridge
+#     kubectl create secret tls ocis-ftp-bridge-tls \
+#       --cert=ftp.crt --key=ftp.key -n ocis-ftp-bridge
+#
 # Note: This example uses placeholder values. Replace with your actual
 # configuration and adjust resource requirements as needed.
 
@@ -41,18 +48,29 @@ data:
   config.yaml: |
     server:
       listen: ":2121"
+      # Connection and rate limits are enforced per bridge instance: with
+      # N replicas the effective limit is N times the configured value
+      # (see docs/adr/0001-multi-replica-scaling.md).
       max_connections: 100
       passive:
         min_port: 40000
         max_port: 50000
         # public_ip: "10.0.0.100"  # Set to the external IP if behind NAT
+      # Explicit FTPS (AUTH TLS). The certificate and key come from the
+      # ocis-ftp-bridge-tls Secret (see the volumes section below).
       tls:
-        enabled: false
-        # cert: "/etc/ssl/certs/tls.crt"
-        # key: "/etc/ssl/private/tls.key"
-    
+        enabled: true
+        cert: "/etc/ssl/ftp-bridge/tls.crt"
+        key: "/etc/ssl/ftp-bridge/tls.key"
+
     http:
-      address: ":9200"
+      address: ":9090"
+      # Bridge-level auth is disabled: kubelet httpGet probes cannot send
+      # credentials, and this Service is ClusterIP (cluster-internal only).
+      # Restrict access with a NetworkPolicy; front /metrics with an
+      # authenticating ingress if it must leave the cluster.
+      auth:
+        enabled: false
     
     ocis:
       url: "https://ocis.ocis.svc.cluster.local:9200"
@@ -81,24 +99,6 @@ data:
     #       max_size: 100MiB
 
 ---
-# Persistent Volume Claim for spool storage
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: ocis-ftp-bridge-spool
-  namespace: ocis-ftp-bridge
-  labels:
-    app: ocis-ftp-bridge
-
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 10Gi
-  storageClassName: standard  # Adjust to your cluster's storage class
-
----
 # Deployment
 apiVersion: apps/v1
 kind: Deployment
@@ -110,24 +110,27 @@ metadata:
     component: ftp-bridge
 
 spec:
-  replicas: 1  # Single replica for simplicity; scale if needed
-  
+  # Replica count is managed by the HPA below (min 1, max 3). Multi-replica
+  # is safe: the spool is a per-replica emptyDir and FTP sessions are pinned
+  # to a pod by the Services' sessionAffinity: ClientIP
+  # (docs/adr/0001-multi-replica-scaling.md, issue #71).
+  replicas: 1
+
   selector:
     matchLabels:
       app: ocis-ftp-bridge
       component: ftp-bridge
-  
+
   template:
     metadata:
       labels:
         app: ocis-ftp-bridge
         component: ftp-bridge
         version: "1.0.0"
-      
-      annotations:
-        # Reload when config changes
-        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
-    
+      # This is a plain kubectl manifest (no Helm template syntax). After
+      # changing the ConfigMap, roll the pods manually:
+      #   kubectl rollout restart deployment/ocis-ftp-bridge -n ocis-ftp-bridge
+
     spec:
       # Run as non-root for security
       securityContext:
@@ -156,7 +159,7 @@ spec:
           containerPort: 50000
           protocol: TCP
         - name: http
-          containerPort: 9200
+          containerPort: 9090
           protocol: TCP
         
         # Resource requests and limits
@@ -204,6 +207,9 @@ spec:
         - name: config
           mountPath: /app/config
           readOnly: true
+        - name: tls-certs
+          mountPath: /etc/ssl/ftp-bridge
+          readOnly: true
         - name: spool
           mountPath: /var/spool/ocis-ftp-bridge
         - name: tmp
@@ -225,9 +231,18 @@ spec:
       - name: config
         configMap:
           name: ocis-ftp-bridge-config
+      # TLS certificate for explicit FTPS; create before applying (see the
+      # header of this file).
+      - name: tls-certs
+        secret:
+          secretName: ocis-ftp-bridge-tls
+      # The spool is a per-replica emptyDir: uploads are pushed to oCIS
+      # within the FTP session, so the spool never needs sharing between
+      # replicas. The in-bridge spool monitor enforces max_total_size per
+      # instance. Trade-off: a pod crash loses that pod's in-flight
+      # uploads; FTP has no resume, so the printer simply retries.
       - name: spool
-        persistentVolumeClaim:
-          claimName: ocis-ftp-bridge-spool
+        emptyDir: {}
       - name: tmp
         emptyDir:
           sizeLimit: 100Mi
@@ -245,6 +260,9 @@ metadata:
 
 spec:
   type: LoadBalancer
+  # FTP sessions are long-lived and cannot be rebalanced; pin each client
+  # to one pod so control and data connections stay together (issue #71).
+  sessionAffinity: ClientIP
   selector:
     app: ocis-ftp-bridge
     component: ftp-bridge
@@ -274,8 +292,8 @@ spec:
   
   ports:
   - name: http
-    port: 9200
-    targetPort: 9200
+    port: 9090
+    targetPort: 9090
     protocol: TCP
 
 ---
@@ -293,6 +311,10 @@ metadata:
 
 spec:
   type: LoadBalancer
+  # Pin passive data connections the same way as the control connection:
+  # ClientIP affinity hashes the same client IP to the same pod on both
+  # Services (issue #71).
+  sessionAffinity: ClientIP
   selector:
     app: ocis-ftp-bridge
     component: ftp-bridge
@@ -327,6 +349,10 @@ spec:
     name: ocis-ftp-bridge
   
   minReplicas: 1
+  # Multi-replica is safe: the spool is a per-replica emptyDir and FTP
+  # sessions are pinned by sessionAffinity: ClientIP. Rate limits and
+  # connection limits are per-instance, so the effective limit scales with
+  # the replica count (docs/adr/0001-multi-replica-scaling.md, issue #71).
   maxReplicas: 3
   
   metrics:

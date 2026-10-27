@@ -11,8 +11,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
+	"path"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,43 +34,95 @@ import (
 // - Health, readiness, and metrics endpoints are reachable
 // - Restart after a staged/stale spool condition follows the documented policy
 
-// uploadedFiles stores files uploaded via the mock WebDAV server
-var uploadedFiles = make(map[string][]byte)
+// The mock WebDAV server keeps its state in package-level maps guarded by
+// mockMu. resetMockState restores the initial state: the root collection
+// "/" and the "/uploads" collection exist, everything else must be created
+// with MKCOL.
+var (
+	mockMu          sync.Mutex
+	uploadedFiles   = make(map[string][]byte)
+	mockCollections = map[string]bool{"/": true, "/uploads": true}
+)
+
+// resetMockState restores the mock server's initial state.
+func resetMockState() {
+	mockMu.Lock()
+	defer mockMu.Unlock()
+	uploadedFiles = make(map[string][]byte)
+	mockCollections = map[string]bool{"/": true, "/uploads": true}
+}
 
 // MockOCIS creates a test HTTP server that simulates oCIS WebDAV and Graph API
 func MockOCIS() (*httptest.Server, *httptest.Server, error) {
-	// Create WebDAV mock server
+	resetMockState()
+
+	// Create WebDAV mock server. The handler implements real WebDAV semantics
+	// (see mock_test.go) so the e2e scenarios cannot be masked by
+	// unconditional success: PUT into a missing parent collection fails with
+	// 404, PUT with If-None-Match: * onto an existing object fails with 412,
+	// MKCOL on an existing collection fails with 405, and MKCOL with a
+	// missing parent fails with 409 (MKCOL is not recursive).
 	webdavServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/webdav")
-		fullPath := filepath.Join("uploads", path)
+		urlPath := "/" + strings.Trim(strings.TrimPrefix(r.URL.Path, "/webdav"), "/")
+
+		mockMu.Lock()
+		defer mockMu.Unlock()
 
 		switch r.Method {
 		case "MKCOL":
-			// Create directory - always succeed for testing
+			if mockCollections[urlPath] {
+				http.Error(w, "Collection already exists", http.StatusMethodNotAllowed)
+				return
+			}
+			if parent := path.Dir(urlPath); !mockCollections[parent] {
+				http.Error(w, "Parent collection does not exist", http.StatusConflict)
+				return
+			}
+			mockCollections[urlPath] = true
 			w.WriteHeader(http.StatusCreated)
 		case "PUT":
-			// Store the file content
+			// A real WebDAV server does not create parent collections
+			// implicitly: PUT into a missing parent fails with 404.
+			if parent := path.Dir(urlPath); !mockCollections[parent] {
+				http.Error(w, "Parent collection does not exist", http.StatusNotFound)
+				return
+			}
+			// The bridge sends If-None-Match: * for non-overwriting uploads
+			// (QLT-002); a real server answers 412 when the target exists.
+			if r.Header.Get("If-None-Match") == "*" {
+				if _, exists := uploadedFiles[urlPath]; exists {
+					http.Error(w, "Precondition failed", http.StatusPreconditionFailed)
+					return
+				}
+			}
 			body, err := io.ReadAll(r.Body)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			// Simulate storing the file
-			uploadedFiles[fullPath] = body
+			uploadedFiles[urlPath] = body
 			w.WriteHeader(http.StatusCreated)
 		case "GET":
-			if content, ok := uploadedFiles[fullPath]; ok {
+			if content, ok := uploadedFiles[urlPath]; ok {
 				w.WriteHeader(http.StatusOK)
 				w.Write(content)
-			} else {
-				http.Error(w, "Not Found", http.StatusNotFound)
+				return
 			}
-		case "HEAD":
-			if _, ok := uploadedFiles[fullPath]; ok {
+			if mockCollections[urlPath] {
 				w.WriteHeader(http.StatusOK)
-			} else {
-				http.Error(w, "Not Found", http.StatusNotFound)
+				return
 			}
+			http.Error(w, "Not Found", http.StatusNotFound)
+		case "HEAD":
+			if _, ok := uploadedFiles[urlPath]; ok {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			if mockCollections[urlPath] {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			http.Error(w, "Not Found", http.StatusNotFound)
 		case "PROPFIND":
 			// Return simple directory listing
 			w.Header().Set("Content-Type", "application/xml")
@@ -143,23 +196,24 @@ func TestNestedPathUpload(t *testing.T) {
 	// Test nested path creation
 	nestedPath := "/webdav/uploads/year/month/day/test-file.txt"
 	uploadURL := webdavServer.URL + nestedPath
-	
-	// First create the directory structure (MKCOL)
-	mkdirURL := webdavServer.URL + "/webdav/uploads/year/month/day"
-	req, err := http.NewRequest("MKCOL", mkdirURL, nil)
-	require.NoError(t, err)
-	
+
+	// Create the directory structure level by level: MKCOL is not recursive
+	// and fails with 409 when the parent collection is missing.
 	client := &http.Client{}
-	resp, err := client.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
-	
+	for _, dir := range []string{"/webdav/uploads/year", "/webdav/uploads/year/month", "/webdav/uploads/year/month/day"} {
+		req, err := http.NewRequest("MKCOL", webdavServer.URL+dir, nil)
+		require.NoError(t, err)
+		resp, err := client.Do(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusCreated, resp.StatusCode, "MKCOL %s", dir)
+		resp.Body.Close()
+	}
+
 	// Upload file to nested path
 	testData := []byte("Test data in nested directory")
-	req, err = http.NewRequest("PUT", uploadURL, bytes.NewReader(testData))
+	req, err := http.NewRequest("PUT", uploadURL, bytes.NewReader(testData))
 	require.NoError(t, err)
-	resp, err = client.Do(req)
+	resp, err := client.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
@@ -178,7 +232,7 @@ func TestNestedPathUpload(t *testing.T) {
 // TestCleanup verifies cleanup of temporary files
 func TestCleanup(t *testing.T) {
 	// Clean up global state
-	uploadedFiles = make(map[string][]byte)
+	resetMockState()
 }
 
 // Additional utility functions for E2E testing
