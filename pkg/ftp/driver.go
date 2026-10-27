@@ -912,14 +912,24 @@ type uploadWriter struct {
 	upload       *spool.Upload
 	spoolUpload  *spoolUpload
 	bytesWritten int64
+	// writeErr tracks the first error encountered during Write.
+	// If set, Close aborts the upload instead of publishing truncated data.
+	// See issue #108.
+	writeErr error
 }
 
 // Write implements io.Writer interface
 func (w *uploadWriter) Write(p []byte) (n int, err error) {
+	// If a previous write already failed, don't accept more data
+	if w.writeErr != nil {
+		return 0, w.writeErr
+	}
+
 	// Check if upload was cancelled
 	select {
 	case <-w.upload.Context.Done():
-		return 0, ErrUploadCancelled
+		w.writeErr = ErrUploadCancelled
+		return 0, w.writeErr
 	default:
 	}
 
@@ -929,18 +939,21 @@ func (w *uploadWriter) Write(p []byte) (n int, err error) {
 	// Check size limits
 	remaining := w.upload.Size - w.upload.BytesReceived
 	if int64(len(p)) > remaining && w.upload.Size > 0 {
-		return 0, spool.ErrFileTooLarge
+		w.writeErr = spool.ErrFileTooLarge
+		return 0, w.writeErr
 	}
 
 	// Check account max size
 	// #nosec G115 -- AccountMaxSize is validated <= math.MaxInt64 in spool StartUpload and config validation
 	if w.upload.BytesReceived+int64(len(p)) > int64(w.upload.AccountMaxSize) {
-		return 0, spool.ErrFileTooLarge
+		w.writeErr = spool.ErrFileTooLarge
+		return 0, w.writeErr
 	}
 
 	// Write to spool
 	n, err = w.clientDriver.bridgeDriver.spoolManager.GetUploadManager().WriteChunk(w.upload, p)
 	if err != nil {
+		w.writeErr = err
 		w.clientDriver.bridgeDriver.obs.Log("error", fmt.Sprintf("Upload write failed for user %s, upload %s: %v", w.clientDriver.user, w.uploadID, err))
 		return n, err
 	}
@@ -953,6 +966,23 @@ func (w *uploadWriter) Write(p []byte) (n int, err error) {
 
 // Close is called when the upload is complete or aborted
 func (w *uploadWriter) Close() error {
+	// If a write error occurred during the transfer, abort the upload
+	// instead of publishing truncated data to oCIS. See issue #108.
+	if w.writeErr != nil {
+		err := w.clientDriver.bridgeDriver.spoolManager.GetUploadManager().AbortUpload(w.upload)
+		if err != nil {
+			w.clientDriver.bridgeDriver.obs.Log("warn", fmt.Sprintf("Upload abort failed for user %s, upload %s: %v", w.clientDriver.user, w.uploadID, err))
+		}
+
+		// Clean up tracking
+		w.clientDriver.mu.Lock()
+		delete(w.clientDriver.spoolUploads, w.uploadID)
+		w.clientDriver.mu.Unlock()
+
+		atomic.AddUint64(&w.clientDriver.bridgeDriver.uploadsFailed, 1)
+		return w.writeErr
+	}
+
 	// Try to finish the upload
 	if w.upload.BytesReceived == w.upload.Size || w.upload.Size <= 0 {
 		// If we don't know the size or we've received all data, finish the upload

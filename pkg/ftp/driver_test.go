@@ -332,3 +332,71 @@ func TestHandleUploadOpenPathMapping(t *testing.T) {
 		})
 	}
 }
+
+// TestUploadWriterCloseAbortsOnWriteError verifies that when a Write error
+// occurs (e.g. file too large), Close aborts the upload instead of
+// publishing truncated data to oCIS. See issue #108.
+func TestUploadWriterCloseAbortsOnWriteError(t *testing.T) {
+	spoolDir := t.TempDir()
+	spoolManager, err := spool.NewManager(spoolDir, 1024*1024)
+	if err != nil {
+		t.Fatalf("failed to create spool manager: %v", err)
+	}
+
+	cfg := config.New()
+	// Account with a small max size (100 bytes)
+	cfg.Accounts = []config.AccountConfig{
+		{
+			Username: "test-printer",
+			Target:   config.TargetConfig{DriveID: "test-drive-id", Root: "/"},
+			Upload:   config.UploadConfig{CollisionPolicy: "rename", MaxSize: 100},
+		},
+	}
+	d := NewBridgeDriver(cfg, noopObs{}, spoolManager, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	client := &bridgeClientDriver{
+		bridgeDriver: d,
+		account:      &cfg.Accounts[0],
+		user:         "test-printer",
+		currentDir:   "/",
+		spoolUploads: make(map[string]*spoolUpload),
+		context:      ctx,
+		cancel:       cancel,
+	}
+
+	w, err := client.handleUploadOpen("/test-file.txt")
+	if err != nil {
+		t.Fatalf("handleUploadOpen failed: %v", err)
+	}
+
+	// Write data that exceeds the account max size (100 bytes)
+	largeData := make([]byte, 200)
+	_, writeErr := w.Write(largeData)
+	if writeErr == nil {
+		t.Fatal("expected Write to return an error for oversized data")
+	}
+
+	// Close should abort the upload, not publish truncated data
+	closeErr := w.Close()
+	if closeErr == nil {
+		t.Fatal("expected Close to return an error when write failed")
+	}
+
+	// The upload should have been aborted (removed from active uploads)
+	uploadMgr := spoolManager.GetUploadManager()
+	if upload := uploadMgr.GetUpload(w.upload.ID); upload != nil {
+		t.Fatal("upload should have been aborted (removed from active uploads)")
+	}
+
+	// No spool file should remain for this upload
+	files, err := spoolManager.List("test-printer")
+	if err != nil {
+		t.Fatalf("failed to list spool files: %v", err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("expected 0 spool files after abort, got %d", len(files))
+	}
+}
