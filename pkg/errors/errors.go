@@ -14,40 +14,40 @@ type ErrorCode string
 // Standard error codes for the application.
 const (
 	// General errors
-	ErrCodeUnknown         ErrorCode = "UNKNOWN"
+	ErrCodeUnknown        ErrorCode = "UNKNOWN"
 	ErrCodeInvalidInput   ErrorCode = "INVALID_INPUT"
 	ErrCodeNotFound       ErrorCode = "NOT_FOUND"
 	ErrCodeAlreadyExists  ErrorCode = "ALREADY_EXISTS"
 	ErrCodeNotImplemented ErrorCode = "NOT_IMPLEMENTED"
-	
+
 	// Authentication and authorization errors
-	ErrCodeUnauthorized   ErrorCode = "UNAUTHORIZED"
-	ErrCodeForbidden      ErrorCode = "FORBIDDEN"
+	ErrCodeUnauthorized       ErrorCode = "UNAUTHORIZED"
+	ErrCodeForbidden          ErrorCode = "FORBIDDEN"
 	ErrCodeInvalidCredentials ErrorCode = "INVALID_CREDENTIALS" // #nosec G101 -- error code constant, not a credential
-	
+
 	// Configuration errors
 	ErrCodeInvalidConfig  ErrorCode = "INVALID_CONFIG"
 	ErrCodeConfigNotFound ErrorCode = "CONFIG_NOT_FOUND"
-	
+
 	// File and storage errors
-	ErrCodeIO             ErrorCode = "IO_ERROR"
-	ErrCodeFileTooLarge   ErrorCode = "FILE_TOO_LARGE"
-	ErrCodeStorageFull    ErrorCode = "STORAGE_FULL"
-	
+	ErrCodeIO           ErrorCode = "IO_ERROR"
+	ErrCodeFileTooLarge ErrorCode = "FILE_TOO_LARGE"
+	ErrCodeStorageFull  ErrorCode = "STORAGE_FULL"
+
 	// Network and connection errors
-	ErrCodeConnection     ErrorCode = "CONNECTION_ERROR"
-	ErrCodeTimeout        ErrorCode = "TIMEOUT"
-	
+	ErrCodeConnection ErrorCode = "CONNECTION_ERROR"
+	ErrCodeTimeout    ErrorCode = "TIMEOUT"
+
 	// Security errors
-	ErrCodePathTraversal  ErrorCode = "PATH_TRAVERSAL"
-	ErrCodeSecurity       ErrorCode = "SECURITY_ERROR"
-	
+	ErrCodePathTraversal ErrorCode = "PATH_TRAVERSAL"
+	ErrCodeSecurity      ErrorCode = "SECURITY_ERROR"
+
 	// Rate limiting errors
-	ErrCodeRateLimited    ErrorCode = "RATE_LIMITED"
-	
+	ErrCodeRateLimited ErrorCode = "RATE_LIMITED"
+
 	// Service errors
 	ErrCodeServiceUnavailable ErrorCode = "SERVICE_UNAVAILABLE"
-	ErrCodeInternal        ErrorCode = "INTERNAL_ERROR"
+	ErrCodeInternal           ErrorCode = "INTERNAL_ERROR"
 )
 
 // AppError is the structured error type for the application.
@@ -81,17 +81,17 @@ func (e *AppError) Is(target error) bool {
 	if target == nil {
 		return false
 	}
-	
+
 	// Check if target is an AppError with the same code
 	if other, ok := target.(*AppError); ok {
 		return e.Code == other.Code
 	}
-	
+
 	// Check if target is a simple error with matching message
 	if e.Err != nil {
 		return errors.Is(e.Err, target)
 	}
-	
+
 	return false
 }
 
@@ -120,7 +120,7 @@ func Wrap(code ErrorCode, message string, err error) *AppError {
 	if err == nil {
 		return New(code, message)
 	}
-	
+
 	return &AppError{
 		Code:    code,
 		Message: message,
@@ -134,14 +134,14 @@ func WrapWithDetails(code ErrorCode, message string, err error, details map[stri
 	if err == nil {
 		return NewWithDetails(code, message, details)
 	}
-	
+
 	appErr := &AppError{
 		Code:    code,
 		Message: message,
 		Details: details,
 		Err:     err,
 	}
-	
+
 	// If the wrapped error is also an AppError, preserve its details
 	if other, ok := err.(*AppError); ok {
 		for k, v := range other.Details {
@@ -150,7 +150,7 @@ func WrapWithDetails(code ErrorCode, message string, err error, details map[stri
 			}
 		}
 	}
-	
+
 	return appErr
 }
 
@@ -160,12 +160,12 @@ func GetCode(err error) ErrorCode {
 	if err == nil {
 		return ErrCodeUnknown
 	}
-	
+
 	var appErr *AppError
 	if errors.As(err, &appErr) {
 		return appErr.Code
 	}
-	
+
 	return ErrCodeUnknown
 }
 
@@ -175,12 +175,12 @@ func GetMessage(err error) string {
 	if err == nil {
 		return ""
 	}
-	
+
 	var appErr *AppError
 	if errors.As(err, &appErr) {
 		return appErr.Message
 	}
-	
+
 	return err.Error()
 }
 
@@ -190,12 +190,12 @@ func GetDetails(err error) map[string]interface{} {
 	if err == nil {
 		return nil
 	}
-	
+
 	var appErr *AppError
 	if errors.As(err, &appErr) {
 		return appErr.Details
 	}
-	
+
 	return nil
 }
 
@@ -209,7 +209,7 @@ func IsAnyCode(err error, codes ...ErrorCode) bool {
 	if err == nil {
 		return false
 	}
-	
+
 	code := GetCode(err)
 	for _, c := range codes {
 		if code == c {
@@ -225,7 +225,7 @@ func WithDetails(err error, details map[string]interface{}) error {
 	if err == nil {
 		return nil
 	}
-	
+
 	var appErr *AppError
 	if errors.As(err, &appErr) {
 		// Merge details
@@ -234,7 +234,7 @@ func WithDetails(err error, details map[string]interface{}) error {
 		}
 		return appErr
 	}
-	
+
 	// For non-AppError, create a new AppError
 	return &AppError{
 		Code:    ErrCodeInternal,
@@ -332,21 +332,21 @@ func Join(errs ...error) error {
 			nonNilErrs = append(nonNilErrs, err)
 		}
 	}
-	
+
 	if len(nonNilErrs) == 0 {
 		return nil
 	}
-	
+
 	if len(nonNilErrs) == 1 {
 		return nonNilErrs[0]
 	}
-	
+
 	// Create a combined error message
 	var messages []string
 	for _, err := range nonNilErrs {
 		messages = append(messages, err.Error())
 	}
-	
+
 	return New(
 		ErrCodeInternal,
 		fmt.Sprintf("multiple errors: %s", strings.Join(messages, "; ")),
@@ -358,7 +358,7 @@ func HTTPStatus(err error) int {
 	if err == nil {
 		return 200
 	}
-	
+
 	switch GetCode(err) {
 	case ErrCodeNotFound:
 		return 404

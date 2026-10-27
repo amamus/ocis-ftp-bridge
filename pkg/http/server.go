@@ -44,12 +44,12 @@ type OperationsServer struct {
 	ready   int32 // atomic: 1 = ready, 0 = not ready
 
 	// Configuration for health checks
-	ocisURL              string
-	ocisUsername         string
-	ocisPassword         string
-	webdavURL            string
-	spoolDirectory       string
-	checkTimeout         time.Duration
+	ocisURL        string
+	ocisUsername   string
+	ocisPassword   string
+	webdavURL      string
+	spoolDirectory string
+	checkTimeout   time.Duration
 
 	// Cached health check results: /readyz serves these for up to
 	// healthCheckCacheTTL instead of running outbound checks per request
@@ -70,17 +70,17 @@ type OperationsServer struct {
 	ftpUploadBytesTotal    prometheus.Collector
 	ftpUploadDuration      prometheus.Collector
 	ocisRequestsTotal      prometheus.Collector
-	
+
 	// Health check metrics
 	healthCheckTotal    prometheus.Collector
 	healthCheckDuration prometheus.Collector
 
 	// Spool monitoring metrics
-	SpoolSizeBytes              prometheus.Collector
-	SpoolFileCount              prometheus.Collector
-	SpoolCapacityBytes          prometheus.Collector
-	SpoolUsagePercent           prometheus.Collector
-	SpoolCapacityExceededTotal  prometheus.Collector
+	SpoolSizeBytes             prometheus.Collector
+	SpoolFileCount             prometheus.Collector
+	SpoolCapacityBytes         prometheus.Collector
+	SpoolUsagePercent          prometheus.Collector
+	SpoolCapacityExceededTotal prometheus.Collector
 }
 
 // HealthCheckConfig contains configuration for health checks
@@ -98,33 +98,33 @@ type HealthCheckConfig struct {
 func (s *OperationsServer) checkOCISConnectivity() error {
 	ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout)
 	defer cancel()
-	
+
 	url := s.ocisURL
 	if !strings.HasSuffix(url, "/") {
 		url += "/"
 	}
 	url += "status"
-	
+
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create oCIS request: %w", err)
 	}
-	
+
 	// Add basic auth if credentials are configured
 	if s.ocisUsername != "" && s.ocisPassword != "" {
 		req.SetBasicAuth(s.ocisUsername, s.ocisPassword)
 	}
-	
+
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to connect to oCIS: %w", err)
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("oCIS returned non-OK status: %s", resp.Status)
 	}
-	
+
 	return nil
 }
 
@@ -132,42 +132,42 @@ func (s *OperationsServer) checkOCISConnectivity() error {
 func (s *OperationsServer) checkWebDAVConnectivity() error {
 	ctx, cancel := context.WithTimeout(context.Background(), s.checkTimeout)
 	defer cancel()
-	
+
 	url := s.webdavURL
 	if !strings.HasSuffix(url, "/") {
 		url += "/"
 	}
-	
+
 	req, err := http.NewRequestWithContext(ctx, "PROPFIND", url, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create WebDAV request: %w", err)
 	}
-	
+
 	// Add basic auth if credentials are configured
 	if s.ocisUsername != "" && s.ocisPassword != "" {
 		req.SetBasicAuth(s.ocisUsername, s.ocisPassword)
 	}
-	
+
 	// Set required headers for WebDAV
 	req.Header.Set("Depth", "0")
 	req.Header.Set("Content-Type", "application/xml")
-	
+
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to connect to WebDAV: %w", err)
 	}
 	defer resp.Body.Close()
-	
+
 	// WebDAV may return 401 (Unauthorized) which is still a successful connection.
 	// A successful PROPFIND returns 207 Multi-Status.
 	// We want to check if we can reach the server, not necessarily if we're authenticated.
 	if resp.StatusCode != http.StatusOK &&
-	   resp.StatusCode != http.StatusMultiStatus &&
-	   resp.StatusCode != http.StatusUnauthorized &&
-	   resp.StatusCode != http.StatusForbidden {
+		resp.StatusCode != http.StatusMultiStatus &&
+		resp.StatusCode != http.StatusUnauthorized &&
+		resp.StatusCode != http.StatusForbidden {
 		return fmt.Errorf("WebDAV returned unexpected status: %s", resp.Status)
 	}
-	
+
 	return nil
 }
 
@@ -176,7 +176,7 @@ func (s *OperationsServer) checkSpoolDirectory() error {
 	if s.spoolDirectory == "" {
 		return errors.New("spool directory not configured")
 	}
-	
+
 	// Check if directory exists
 	info, err := os.Stat(s.spoolDirectory)
 	if err != nil {
@@ -185,21 +185,21 @@ func (s *OperationsServer) checkSpoolDirectory() error {
 		}
 		return fmt.Errorf("cannot access spool directory %q: %w", s.spoolDirectory, err)
 	}
-	
+
 	if !info.IsDir() {
 		return fmt.Errorf("spool path %q is not a directory", s.spoolDirectory)
 	}
-	
+
 	// Check if directory is writable using a more reliable method
 	// Use a unique filename to avoid race conditions
 	testFile := filepath.Join(s.spoolDirectory, fmt.Sprintf(".healthcheck_test_%d_%s", os.Getpid(), time.Now().Format("20060102150405")))
 	if err := os.WriteFile(testFile, []byte("test"), 0600); err != nil {
 		return fmt.Errorf("spool directory %q is not writable: %w", s.spoolDirectory, err)
 	}
-	
+
 	// Clean up the test file - best effort, don't fail health check on cleanup issues
 	_ = os.Remove(testFile)
-	
+
 	return nil
 }
 
@@ -207,20 +207,20 @@ func (s *OperationsServer) checkSpoolDirectory() error {
 func (s *OperationsServer) performHealthChecks() (map[string]string, []string) {
 	checks := make(map[string]string)
 	var failedChecks []string
-	
+
 	// Check oCIS connectivity
 	start := time.Now()
 	if err := s.checkOCISConnectivity(); err != nil {
 		checks["ocis_connectivity"] = "failed"
 		failedChecks = append(failedChecks, fmt.Sprintf("oCIS connectivity: %s", err.Error()))
-		
+
 		// Record metrics
 		if cv, ok := s.healthCheckTotal.(*prometheus.CounterVec); ok {
 			cv.WithLabelValues("ocis_connectivity", "failed").Inc()
 		}
 	} else {
 		checks["ocis_connectivity"] = "ok"
-		
+
 		// Record metrics
 		if cv, ok := s.healthCheckTotal.(*prometheus.CounterVec); ok {
 			cv.WithLabelValues("ocis_connectivity", "success").Inc()
@@ -229,20 +229,20 @@ func (s *OperationsServer) performHealthChecks() (map[string]string, []string) {
 	if hv, ok := s.healthCheckDuration.(*prometheus.HistogramVec); ok {
 		hv.WithLabelValues("ocis_connectivity").Observe(time.Since(start).Seconds())
 	}
-	
+
 	// Check WebDAV connectivity
 	start = time.Now()
 	if err := s.checkWebDAVConnectivity(); err != nil {
 		checks["webdav_connectivity"] = "failed"
 		failedChecks = append(failedChecks, fmt.Sprintf("WebDAV connectivity: %s", err.Error()))
-		
+
 		// Record metrics
 		if cv, ok := s.healthCheckTotal.(*prometheus.CounterVec); ok {
 			cv.WithLabelValues("webdav_connectivity", "failed").Inc()
 		}
 	} else {
 		checks["webdav_connectivity"] = "ok"
-		
+
 		// Record metrics
 		if cv, ok := s.healthCheckTotal.(*prometheus.CounterVec); ok {
 			cv.WithLabelValues("webdav_connectivity", "success").Inc()
@@ -251,20 +251,20 @@ func (s *OperationsServer) performHealthChecks() (map[string]string, []string) {
 	if hv, ok := s.healthCheckDuration.(*prometheus.HistogramVec); ok {
 		hv.WithLabelValues("webdav_connectivity").Observe(time.Since(start).Seconds())
 	}
-	
+
 	// Check spool directory
 	start = time.Now()
 	if err := s.checkSpoolDirectory(); err != nil {
 		checks["spool_directory"] = "failed"
 		failedChecks = append(failedChecks, fmt.Sprintf("spool directory: %s", err.Error()))
-		
+
 		// Record metrics
 		if cv, ok := s.healthCheckTotal.(*prometheus.CounterVec); ok {
 			cv.WithLabelValues("spool_directory", "failed").Inc()
 		}
 	} else {
 		checks["spool_directory"] = "ok"
-		
+
 		// Record metrics
 		if cv, ok := s.healthCheckTotal.(*prometheus.CounterVec); ok {
 			cv.WithLabelValues("spool_directory", "success").Inc()
@@ -273,7 +273,7 @@ func (s *OperationsServer) performHealthChecks() (map[string]string, []string) {
 	if hv, ok := s.healthCheckDuration.(*prometheus.HistogramVec); ok {
 		hv.WithLabelValues("spool_directory").Observe(time.Since(start).Seconds())
 	}
-	
+
 	return checks, failedChecks
 }
 
@@ -530,11 +530,11 @@ func NewOperationsServer(address string, auth AuthConfig, healthConfig HealthChe
 		// Serve cached health check results, refreshed at most once per
 		// healthCheckCacheTTL (SEC-010).
 		checks, failedChecks := s.cachedHealthChecks()
-		
+
 		if len(failedChecks) > 0 {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.WriteHeader(http.StatusServiceUnavailable)
-			
+
 			// Build error response
 			errorsJSON := "["
 			firstError := true
@@ -546,7 +546,7 @@ func NewOperationsServer(address string, auth AuthConfig, healthConfig HealthChe
 				errorsJSON += `"` + escapeJSON(err) + `"`
 			}
 			errorsJSON += "]"
-			
+
 			checksJSON := "{"
 			firstCheck := true
 			for check, status := range checks {
@@ -557,19 +557,19 @@ func NewOperationsServer(address string, auth AuthConfig, healthConfig HealthChe
 				checksJSON += `"` + check + `":"` + status + `"`
 			}
 			checksJSON += "}"
-			
-			response := fmt.Sprintf(`{"status":"not_ready","checks":%s,"errors":%s,"timestamp":%s}`, 
+
+			response := fmt.Sprintf(`{"status":"not_ready","checks":%s,"errors":%s,"timestamp":%s}`,
 				checksJSON, errorsJSON, getCurrentTimestamp())
 			w.Write([]byte(response))
 			return
 		}
-		
+
 		// All checks passed. Readiness is computed per request from the
 		// check results; the handler must not mutate global readiness
 		// state (SEC-010).
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		
+
 		checksJSON := "{"
 		first := true
 		for check, status := range checks {
@@ -580,7 +580,7 @@ func NewOperationsServer(address string, auth AuthConfig, healthConfig HealthChe
 			checksJSON += `"` + check + `":"` + status + `"`
 		}
 		checksJSON += "}"
-		
+
 		response := fmt.Sprintf(`{"status":"ready","checks":%s,"timestamp":%s}`, checksJSON, getCurrentTimestamp())
 		w.Write([]byte(response))
 	})))
@@ -603,7 +603,7 @@ func NewOperationsServer(address string, auth AuthConfig, healthConfig HealthChe
 // UpdateReadiness performs health checks and updates the readiness state accordingly
 func (s *OperationsServer) UpdateReadiness() {
 	_, failedChecks := s.performHealthChecks()
-	
+
 	if len(failedChecks) > 0 {
 		atomic.StoreInt32(&s.ready, 0)
 		fmt.Printf("Health checks failed: %v\n", failedChecks)
@@ -777,6 +777,7 @@ func (s *OperationsServer) IncrementOcisRequestsTotal(service, status string) {
 		cv.WithLabelValues(service, status).Inc()
 	}
 }
+
 // Spool monitoring methods
 
 // SetSpoolSizeBytes sets the current spool size in bytes

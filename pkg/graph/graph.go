@@ -10,21 +10,21 @@ import "fmt"
 type Client interface {
 	// ResolveDrive resolves a drive ID to drive information.
 	ResolveDrive(id string) (Drive, error)
-	
+
 	// ListDrives lists the drives visible to the authenticated user
 	// (/me/drives). userID is informational: the client always authenticates
 	// with the account's own token (QLT-005).
 	ListDrives(userID string) ([]Drive, error)
-	
+
 	// ResolveSpace resolves a space ID to space information.
 	ResolveSpace(id string) (Space, error)
-	
+
 	// ListSpaces lists all spaces for a user.
 	ListSpaces(userID string) ([]Space, error)
-	
+
 	// SearchDrives searches drives by name.
 	SearchDrives(userID, name string) ([]Drive, error)
-	
+
 	// SearchSpaces searches spaces by name.
 	SearchSpaces(userID, name string) ([]Space, error)
 }
@@ -33,19 +33,19 @@ type Client interface {
 type Drive struct {
 	// ID is the unique identifier for the drive.
 	ID string `json:"id"`
-	
+
 	// Name is the display name of the drive.
 	Name string `json:"name"`
-	
+
 	// Description is the description of the drive.
 	Description string `json:"description,omitempty"`
-	
+
 	// Owner is the owner of the drive.
 	Owner Owner `json:"owner"`
-	
+
 	// Permissions are the user permissions on this drive.
 	Permissions []Permission `json:"permissions"`
-	
+
 	// Root is the root of the drive.
 	Root Root `json:"root"`
 
@@ -57,19 +57,19 @@ type Drive struct {
 type Space struct {
 	// ID is the unique identifier for the space.
 	ID string `json:"id"`
-	
+
 	// Name is the display name of the space.
 	Name string `json:"name"`
-	
+
 	// Description is the description of the space.
 	Description string `json:"description,omitempty"`
-	
+
 	// Owner is the owner of the space.
 	Owner Owner `json:"owner"`
-	
+
 	// Permissions are the user permissions on this space.
 	Permissions []Permission `json:"permissions"`
-	
+
 	// Root is the root of the space.
 	Root Root `json:"root"`
 }
@@ -78,7 +78,7 @@ type Space struct {
 type Owner struct {
 	// ID is the unique identifier of the owner.
 	ID string `json:"id"`
-	
+
 	// DisplayName is the display name of the owner.
 	DisplayName string `json:"display_name"`
 }
@@ -93,7 +93,7 @@ type Root struct {
 type Permission struct {
 	// ID is the unique identifier of the permission.
 	ID string `json:"id"`
-	
+
 	// Roles are the roles granted by this permission.
 	Roles []Role `json:"roles"`
 }
@@ -104,13 +104,13 @@ type Role string
 const (
 	// RoleNone indicates no role.
 	RoleNone Role = ""
-	
+
 	// RoleOwner indicates the owner role.
 	RoleOwner Role = "owner"
-	
+
 	// RoleContributor indicates the contributor role.
 	RoleContributor Role = "contributor"
-	
+
 	// RoleViewer indicates the viewer role.
 	RoleViewer Role = "viewer"
 )
@@ -138,14 +138,14 @@ func (e *GraphError) Error() string {
 }
 
 var (
-	ErrInvalidDriveID      = &GraphError{msg: "invalid drive ID"}
-	ErrInvalidSpaceID      = &GraphError{msg: "invalid space ID"}
-	ErrInvalidUserID       = &GraphError{msg: "invalid user ID"}
-	ErrInvalidParameters   = &GraphError{msg: "invalid parameters"}
-	ErrDriveNotFound       = &GraphError{msg: "drive not found"}
-	ErrSpaceNotFound       = &GraphError{msg: "space not found"}
-	ErrUnauthorized         = &GraphError{msg: "unauthorized"}
-	ErrForbidden            = &GraphError{msg: "forbidden"}
-	ErrGraphAPIError        = &GraphError{msg: "LibreGraph API error"}
-	ErrNotImplemented       = &GraphError{msg: "operation not implemented"}
+	ErrInvalidDriveID    = &GraphError{msg: "invalid drive ID"}
+	ErrInvalidSpaceID    = &GraphError{msg: "invalid space ID"}
+	ErrInvalidUserID     = &GraphError{msg: "invalid user ID"}
+	ErrInvalidParameters = &GraphError{msg: "invalid parameters"}
+	ErrDriveNotFound     = &GraphError{msg: "drive not found"}
+	ErrSpaceNotFound     = &GraphError{msg: "space not found"}
+	ErrUnauthorized      = &GraphError{msg: "unauthorized"}
+	ErrForbidden         = &GraphError{msg: "forbidden"}
+	ErrGraphAPIError     = &GraphError{msg: "LibreGraph API error"}
+	ErrNotImplemented    = &GraphError{msg: "operation not implemented"}
 )

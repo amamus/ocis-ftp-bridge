@@ -42,7 +42,7 @@ func TestMonitor_CalculateCurrentUsage(t *testing.T) {
 	// Create monitor
 	monitor := &Monitor{
 		spoolDir: tempDir,
-		maxSize: 1024 * 1024, // 1MB
+		maxSize:  1024 * 1024, // 1MB
 		config: config.MonitoringConfig{
 			Enabled:           true,
 			WarningThreshold:  80.0,
@@ -106,7 +106,7 @@ func TestMonitor_CalculateCurrentUsageWithDirectories(t *testing.T) {
 	// Create monitor
 	monitor := &Monitor{
 		spoolDir: tempDir,
-		maxSize: 1024 * 1024,
+		maxSize:  1024 * 1024,
 		config: config.MonitoringConfig{
 			Enabled:           true,
 			WarningThreshold:  80.0,
@@ -147,14 +147,14 @@ func TestMonitor_StartStop(t *testing.T) {
 	// Create monitor with disabled monitoring
 	monitor := &Monitor{
 		spoolDir: tempDir,
-		maxSize: 1024 * 1024,
+		maxSize:  1024 * 1024,
 		config: config.MonitoringConfig{
 			Enabled: false, // Disabled for this test
 		},
-		server:    nil,
-		logger:    nil,
-		stopChan:  make(chan struct{}),
-		doneChan:  make(chan struct{}),
+		server:   nil,
+		logger:   nil,
+		stopChan: make(chan struct{}),
+		doneChan: make(chan struct{}),
 	}
 
 	// Start monitor (should return immediately since disabled)
@@ -171,17 +171,17 @@ func TestMonitor_StartStop(t *testing.T) {
 	// Test with enabled monitoring
 	monitor = &Monitor{
 		spoolDir: tempDir,
-		maxSize: 1024 * 1024,
+		maxSize:  1024 * 1024,
 		config: config.MonitoringConfig{
 			Enabled:           true,
 			WarningThreshold:  80.0,
 			CriticalThreshold: 95.0,
 			CheckInterval:     100 * time.Millisecond, // Short interval for testing
 		},
-		server:    nil,
-		logger:    nil,
-		stopChan:  make(chan struct{}),
-		doneChan:  make(chan struct{}),
+		server:   nil,
+		logger:   nil,
+		stopChan: make(chan struct{}),
+		doneChan: make(chan struct{}),
 	}
 
 	// Start monitor
@@ -213,7 +213,7 @@ func TestMonitor_CapacityExceeded(t *testing.T) {
 	// Create monitor
 	monitor := &Monitor{
 		spoolDir: tempDir,
-		maxSize: 1024 * 1024,
+		maxSize:  1024 * 1024,
 		config: config.MonitoringConfig{
 			Enabled:           true,
 			WarningThreshold:  80.0,
@@ -231,6 +231,7 @@ func TestMonitor_CapacityExceeded(t *testing.T) {
 	// We can't easily test this without creating a full mock, so we'll just
 	// ensure it doesn't panic with nil server
 }
+
 // TestMonitorCurrentUsagePrefersCounters verifies that a wired usage function
 // (running counters, PERF-003) is used instead of walking the spool directory:
 // the spool directory does not even exist, so a walk would fail.

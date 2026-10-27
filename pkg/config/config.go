@@ -82,10 +82,10 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Listen        string        `yaml:"listen" json:"listen"`
-	Passive       PassiveConfig `yaml:"passive" json:"passive"`
-	TLS           TLSConfig     `yaml:"tls" json:"tls"`
-	MaxConnections int         `yaml:"max_connections,omitempty" json:"max_connections,omitempty"`
+	Listen         string        `yaml:"listen" json:"listen"`
+	Passive        PassiveConfig `yaml:"passive" json:"passive"`
+	TLS            TLSConfig     `yaml:"tls" json:"tls"`
+	MaxConnections int           `yaml:"max_connections,omitempty" json:"max_connections,omitempty"`
 	// AllowActiveMode enables FTP active mode (PORT/EPRT), which many
 	// printers require. Enabled by default; the bridge only ever dials the
 	// control connection peer's own IP (SEC-005).
@@ -110,15 +110,15 @@ type TLSConfig struct {
 type RateLimitConfig struct {
 	// Per-IP connection rate limiting
 	MaxConnectionsPerIP int `yaml:"max_connections_per_ip,omitempty" json:"max_connections_per_ip,omitempty"`
-	
+
 	// Global connection limiting (overrides per-IP if lower)
 	MaxGlobalConnections int `yaml:"max_global_connections,omitempty" json:"max_global_connections,omitempty"`
-	
+
 	// Authentication attempt rate limiting
-	MaxAuthAttemptsPerIP int `yaml:"max_auth_attempts_per_ip,omitempty" json:"max_auth_attempts_per_ip,omitempty"`
-	AuthAttemptWindow time.Duration `yaml:"auth_attempt_window,omitempty" json:"auth_attempt_window,omitempty"`
-	AuthLockoutDuration time.Duration `yaml:"auth_lockout_duration,omitempty" json:"auth_lockout_duration,omitempty"`
-	
+	MaxAuthAttemptsPerIP int           `yaml:"max_auth_attempts_per_ip,omitempty" json:"max_auth_attempts_per_ip,omitempty"`
+	AuthAttemptWindow    time.Duration `yaml:"auth_attempt_window,omitempty" json:"auth_attempt_window,omitempty"`
+	AuthLockoutDuration  time.Duration `yaml:"auth_lockout_duration,omitempty" json:"auth_lockout_duration,omitempty"`
+
 	// IP lockout tracking
 	TrackFailedAttempts bool `yaml:"track_failed_attempts,omitempty" json:"track_failed_attempts,omitempty"`
 }
@@ -191,7 +191,7 @@ type LoggerConfig struct {
 
 // ObservabilityConfig contains configuration for observability
 type ObservabilityConfig struct {
-	Debug  bool        `yaml:"debug,omitempty" json:"debug,omitempty"`
+	Debug  bool         `yaml:"debug,omitempty" json:"debug,omitempty"`
 	Logger LoggerConfig `yaml:"logger,omitempty" json:"logger,omitempty"`
 }
 
@@ -225,17 +225,17 @@ func New() *Config {
 			// TLS is enabled by default for security
 			// Plain FTP (unencrypted) is insecure and should be avoided
 			TLS: TLSConfig{
-				Enabled: true,  // TLS is enabled by default for security
-				Cert:    "", // Will be validated at startup if enabled
-				Key:     "", // Will be validated at startup if enabled
+				Enabled: true, // TLS is enabled by default for security
+				Cert:    "",   // Will be validated at startup if enabled
+				Key:     "",   // Will be validated at startup if enabled
 			},
 			RateLimiting: RateLimitConfig{
-				MaxConnectionsPerIP:   10,    // Max 10 connections per IP
-				MaxGlobalConnections:  100,   // Max 100 total connections
-				MaxAuthAttemptsPerIP:  5,     // Max 5 auth attempts per IP per window
-				AuthAttemptWindow:     time.Minute, // 1 minute window for auth attempts
-				AuthLockoutDuration:   5 * time.Minute, // 5 minute lockout after max attempts
-				TrackFailedAttempts:   true,   // Track failed auth attempts for rate limiting
+				MaxConnectionsPerIP:  10,              // Max 10 connections per IP
+				MaxGlobalConnections: 100,             // Max 100 total connections
+				MaxAuthAttemptsPerIP: 5,               // Max 5 auth attempts per IP per window
+				AuthAttemptWindow:    time.Minute,     // 1 minute window for auth attempts
+				AuthLockoutDuration:  5 * time.Minute, // 5 minute lockout after max attempts
+				TrackFailedAttempts:  true,            // Track failed auth attempts for rate limiting
 			},
 		},
 		OCIS: OCISConfig{
@@ -249,8 +249,8 @@ func New() *Config {
 			MaxSize:      1024 * 1024 * 1024,
 			Monitoring: MonitoringConfig{
 				Enabled:           true,
-				WarningThreshold:  80.0,  // Warn at 80% usage
-				CriticalThreshold: 95.0,  // Alert at 95% usage
+				WarningThreshold:  80.0,             // Warn at 80% usage
+				CriticalThreshold: 95.0,             // Alert at 95% usage
 				CheckInterval:     30 * time.Second, // Check every 30 seconds
 			},
 		},
@@ -261,8 +261,8 @@ func New() *Config {
 			// proxy (SEC-001).
 			Address: "127.0.0.1:9090",
 			Auth: HTTPAuthConfig{
-				Enabled: true, // Authentication enabled by default for security
-				Method:  "basic",
+				Enabled:  true, // Authentication enabled by default for security
+				Method:   "basic",
 				Username: "admin",
 				// Password will be randomly generated on first run if not specified
 			},
@@ -278,9 +278,9 @@ func checkForPlaintextCredentials(filename string) error {
 	if err != nil {
 		return nil // Can't read, skip check
 	}
-	
+
 	content := string(data)
-	
+
 	// Check for common patterns that might indicate plaintext passwords
 	// These are heuristic checks and may have false positives
 	passwordPatterns := []string{
@@ -293,7 +293,7 @@ func checkForPlaintextCredentials(filename string) error {
 		"token:",
 		"token: ",
 	}
-	
+
 	// Check for plaintext passwords that look like common passwords
 	// These are weak checks but can catch obvious issues
 	commonPasswords := []string{
@@ -306,7 +306,7 @@ func checkForPlaintextCredentials(filename string) error {
 		"secret",
 		"changeme",
 	}
-	
+
 	for _, pattern := range passwordPatterns {
 		if strings.Contains(content, pattern) {
 			// Check if it's followed by what looks like a plaintext password
@@ -341,7 +341,7 @@ func checkForPlaintextCredentials(filename string) error {
 			}
 		}
 	}
-	
+
 	return nil
 }
 
@@ -417,7 +417,7 @@ func (c *Config) validateWithEnv(lookupEnv func(string) (string, bool)) error {
 	if err := c.validateOCIS(); err != nil {
 		return err
 	}
-	
+
 	// Validate HTTP configuration
 	if err := c.validateHTTP(lookupEnv); err != nil {
 		return err
@@ -434,6 +434,9 @@ func (c *Config) validateWithEnv(lookupEnv func(string) (string, bool)) error {
 	c.Spool.MaxSize = uint64(c.Spool.MaxTotalSize)
 
 	seen := make(map[string]struct{}, len(c.Accounts))
+	if len(c.Accounts) == 0 {
+		return errors.New("at least one account is required (accounts must not be empty)")
+	}
 	for i := range c.Accounts {
 		account := &c.Accounts[i]
 		prefix := fmt.Sprintf("accounts[%d]", i)
@@ -449,10 +452,10 @@ func (c *Config) validateWithEnv(lookupEnv func(string) (string, bool)) error {
 		if _, err := parseArgon2ID(account.PasswordHash); err != nil {
 			return fmt.Errorf("%s.password_hash: %w", prefix, err)
 		}
-		
+
 		// Check for known example/test password hashes
 		// These are commonly used in examples and should not be used in production
-	exampleHashes := []string{
+		exampleHashes := []string{
 			"$argon2id$v=19$m=65536,t=3,p=1$MDEyMzQ1Njc4OWFiY2RlZg$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 			"$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJC1OeqncgJ2almHUfLnhtRTVrjD8zGQ",
 			// Hashes shipped in config.yaml.example (QLT-009): the example
@@ -542,7 +545,7 @@ func (c *Config) validateHTTP(lookupEnv func(string) (string, bool)) error {
 			return fmt.Errorf("http.auth.method %q is invalid; expected basic, bearer, or none", c.HTTP.Auth.Method)
 		}
 	}
-	
+
 	return nil
 }
 

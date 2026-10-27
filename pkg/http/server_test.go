@@ -17,7 +17,7 @@ func TestOperationsServer_Creation(t *testing.T) {
 		if server == nil {
 			t.Fatal("Expected non-nil server")
 		}
-		
+
 		if server.Addr() != "" {
 			t.Errorf("Expected empty address before start, got %q", server.Addr())
 		}
@@ -164,19 +164,19 @@ func TestOperationsServer_Metrics(t *testing.T) {
 		// These should not panic
 		server.IncrementFTPSessionTotal("success")
 		server.IncrementFTPSessionTotal("failure")
-		
+
 		server.SetFTPActiveSessions(5)
-		
+
 		server.IncrementUploadsTotal("success")
 		server.IncrementUploadsTotal("failure")
-		
+
 		server.IncrementUploadFailuresTotal("timeout")
 		server.IncrementUploadFailuresTotal("permission_denied")
-		
+
 		server.AddUploadBytes(1024)
-		
+
 		server.ObserveUploadDuration(1*time.Second, "success")
-		
+
 		server.IncrementOcisRequestsTotal("graph", "success")
 		server.IncrementOcisRequestsTotal("webdav", "failure")
 	})
