@@ -313,6 +313,11 @@ type BridgeDriver struct {
 	connectionTracker *ConnectionTracker
 	authAttemptTracker *AuthAttemptTracker
 
+	// authSemaphore bounds concurrent Argon2id password verifications.
+	// Each verification allocates ~64 MiB; without a bound, concurrent
+	// logins can exhaust memory (e.g. 8 logins = ~512 MiB). See issue #111.
+	authSemaphore chan struct{}
+
 	// Per-account upload concurrency caps (PERF-004): one semaphore channel
 	// per account username, created lazily with the account's configured
 	// capacity.
@@ -404,6 +409,7 @@ func NewBridgeDriver(
 		maxConnections: cfg.Server.MaxConnections,
 		connectionTracker: connTracker,
 		authAttemptTracker: authTracker,
+		authSemaphore:  make(chan struct{}, 4), // Max 4 concurrent Argon2id verifications
 		ctx:           ctx,
 		cancel:        cancel,
 		shutdownChan:  make(chan struct{}),
@@ -473,6 +479,16 @@ func (d *BridgeDriver) AuthUser(cc ftpserver.ClientContext, user, password strin
 		if current >= int64(d.maxConnections) {
 			return nil, fmt.Errorf("server connection limit reached")
 		}
+	}
+
+	// Bound concurrent Argon2id verifications to prevent memory exhaustion.
+	// Each verification allocates ~64 MiB; the semaphore limits this to 4
+	// concurrent verifications (~256 MiB max). See issue #111.
+	select {
+	case d.authSemaphore <- struct{}{}:
+		defer func() { <-d.authSemaphore }()
+	default:
+		return nil, fmt.Errorf("too many concurrent authentication attempts, try again later")
 	}
 
 	// Authenticate user
