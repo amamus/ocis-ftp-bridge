@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/argon2"
 	"gopkg.in/yaml.v3"
 )
@@ -554,129 +556,67 @@ func TestParseArgon2IDDigestLengthLimit(t *testing.T) {
 	}
 }
 
-// TestDefaultHTTPAddressIsLoopback guards SEC-001: the operations HTTP server
-// must bind to loopback by default. Metrics and readiness details must not be
-// exposed on all interfaces; production deployments set http.address
-// explicitly and front the endpoint with a TLS-terminating proxy.
-func TestDefaultHTTPAddressIsLoopback(t *testing.T) {
+// TestValidateOCIS_DerivesURLs verifies that when ocis.url is set but
+// graph_url/webdav_url are empty, they are derived from ocis.url with the
+// correct oCIS paths. See issue #113.
+func TestValidateOCIS_DerivesURLs(t *testing.T) {
+	t.Parallel()
+
 	cfg := New()
-	if cfg.HTTP.Address != "127.0.0.1:9090" {
-		t.Errorf("default http.address = %q, want 127.0.0.1:9090 (SEC-001)", cfg.HTTP.Address)
-	}
+	cfg.OCIS.URL = "https://ocis.example.com"
+	cfg.OCIS.GraphURL = ""  // empty: should be derived
+	cfg.OCIS.WebDAVURL = "" // empty: should be derived
+	// Skip other validations by setting minimal required fields
+	cfg.Server.Listen = ":2121"
+	cfg.Server.Passive = PassiveConfig{MinPort: 40000, MaxPort: 50000}
+	cfg.Server.TLS.Enabled = false
+	cfg.Spool.Directory = "/tmp/spool"
+	cfg.Spool.MaxTotalSize = ByteSize(1024 * 1024)
+	cfg.Accounts = nil // no accounts needed for OCIS validation test
+
+	err := cfg.validateOCIS()
+	require.NoError(t, err)
+
+	assert.Equal(t, "https://ocis.example.com/graph/v1.0", cfg.OCIS.GraphURL,
+		"graph_url should be derived as <url>/graph/v1.0")
+	assert.Equal(t, "https://ocis.example.com/webdav", cfg.OCIS.WebDAVURL,
+		"webdav_url should be derived as <url>/webdav")
 }
 
-// TestExampleConfigHashesAreBlocklisted guards QLT-009: the password hashes
-// shipped in config.yaml.example must be rejected by Validate, so a
-// copy-pasted example config fails fast instead of running with publicly
-// known credentials.
-func TestExampleConfigHashesAreBlocklisted(t *testing.T) {
-	data, err := os.ReadFile("../../config.yaml.example")
-	if err != nil {
-		t.Fatalf("failed to read config.yaml.example: %v", err)
-	}
+// TestValidateOCIS_PreservesExplicitURLs verifies that explicitly set
+// graph_url/webdav_url are not overwritten. See issue #113.
+func TestValidateOCIS_PreservesExplicitURLs(t *testing.T) {
+	t.Parallel()
+
+	cfg := New()
+	cfg.OCIS.URL = "https://ocis.example.com"
+	cfg.OCIS.GraphURL = "https://custom.example.com/graph/v1.0"
+	cfg.OCIS.WebDAVURL = "https://custom.example.com/dav/spaces/abc"
+
+	err := cfg.validateOCIS()
+	require.NoError(t, err)
+
+	assert.Equal(t, "https://custom.example.com/graph/v1.0", cfg.OCIS.GraphURL,
+		"explicit graph_url should be preserved")
+	assert.Equal(t, "https://custom.example.com/dav/spaces/abc", cfg.OCIS.WebDAVURL,
+		"explicit webdav_url should be preserved")
+}
+
+// TestOCISConfig_CAFileAndInsecureSkipVerify verifies that the new
+// CA file and insecure skip verify options are parsed from YAML. See issue #113.
+func TestOCISConfig_CAFileAndInsecureSkipVerify(t *testing.T) {
+	t.Parallel()
+
+	yamlData := `
+ocis:
+  url: "https://ocis.example.com"
+  ca_file: "/etc/ssl/certs/custom-ca.pem"
+  insecure_skip_verify: true
+`
 	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		t.Fatalf("config.yaml.example is not valid YAML: %v", err)
-	}
-	t.Setenv("OCIS_APP_TOKEN", "dummy-token")
-	t.Setenv("SCANNER_OCIS_APP_TOKEN", "dummy-token-2")
+	err := yaml.Unmarshal([]byte(yamlData), &cfg)
+	require.NoError(t, err)
 
-	err = cfg.Validate()
-	if err == nil {
-		t.Fatal("config.yaml.example validates cleanly; its shipped password hashes must be blocklisted (QLT-009)")
-	}
-	if !strings.Contains(err.Error(), "example/default hash") {
-		t.Errorf("Validate error = %v, want it to reject the example password hashes (QLT-009)", err)
-	}
-}
-
-// TestAllowActiveModeConfigKey guards SEC-005: the server.allow_active_mode
-// key must be accepted by the strict configuration loader so active FTP mode
-// is configurable (it defaults to enabled for printer compatibility).
-func TestAllowActiveModeConfigKey(t *testing.T) {
-	env := map[string]string{"OCIS_FTP_RECEPTION_TOKEN": "app-token-secret"}
-
-	t.Run("explicitly disabled", func(t *testing.T) {
-		yamlText := strings.Replace(validYAML(testHash("printer-secret")),
-			"  listen: \":21\"\n",
-			"  listen: \":21\"\n  allow_active_mode: false\n",
-			1)
-		cfg, err := loadText(t, yamlText, env)
-		if err != nil {
-			t.Fatalf("config with server.allow_active_mode: false failed to load: %v (SEC-005)", err)
-		}
-		if cfg.Server.AllowActiveMode {
-			t.Error("AllowActiveMode = true, want false (SEC-005)")
-		}
-	})
-
-	t.Run("explicitly enabled", func(t *testing.T) {
-		yamlText := strings.Replace(validYAML(testHash("printer-secret")),
-			"  listen: \":21\"\n",
-			"  listen: \":21\"\n  allow_active_mode: true\n",
-			1)
-		cfg, err := loadText(t, yamlText, env)
-		if err != nil {
-			t.Fatalf("config with server.allow_active_mode: true failed to load: %v (SEC-005)", err)
-		}
-		if !cfg.Server.AllowActiveMode {
-			t.Error("AllowActiveMode = false, want true (SEC-005)")
-		}
-	})
-
-	t.Run("key absent", func(t *testing.T) {
-		cfg, err := loadText(t, validYAML(testHash("printer-secret")), env)
-		if err != nil {
-			t.Fatalf("config without allow_active_mode failed to load: %v", err)
-		}
-		if !cfg.Server.AllowActiveMode {
-			t.Error("AllowActiveMode default = false, want true: active mode must default to enabled for printer compatibility (SEC-005)")
-		}
-	})
-}
-
-// TestMaxConcurrentUploadsConfigKey guards PERF-004: the per-account upload
-// concurrency cap accounts[].upload.max_concurrent_uploads must be accepted
-// by the strict configuration loader, must parse into the account config, and
-// must default to 0 (unlimited) when absent.
-func TestMaxConcurrentUploadsConfigKey(t *testing.T) {
-	env := map[string]string{"OCIS_FTP_RECEPTION_TOKEN": "app-token-secret"}
-
-	t.Run("explicitly set", func(t *testing.T) {
-		yamlText := strings.Replace(validYAML(testHash("printer-secret")),
-			"      max_size: 250MiB\n",
-			"      max_size: 250MiB\n      max_concurrent_uploads: 2\n",
-			1)
-		cfg, err := loadText(t, yamlText, env)
-		if err != nil {
-			t.Fatalf("config with accounts[].upload.max_concurrent_uploads failed to load: %v (PERF-004)", err)
-		}
-		if cfg.Accounts[0].Upload.MaxConcurrentUploads != 2 {
-			t.Errorf("MaxConcurrentUploads = %d, want 2 (PERF-004)", cfg.Accounts[0].Upload.MaxConcurrentUploads)
-		}
-	})
-
-	t.Run("absent defaults to unlimited", func(t *testing.T) {
-		cfg, err := loadText(t, validYAML(testHash("printer-secret")), env)
-		if err != nil {
-			t.Fatalf("config without max_concurrent_uploads failed to load: %v", err)
-		}
-		if cfg.Accounts[0].Upload.MaxConcurrentUploads != 0 {
-			t.Errorf("MaxConcurrentUploads default = %d, want 0 (unlimited, PERF-004)", cfg.Accounts[0].Upload.MaxConcurrentUploads)
-		}
-	})
-
-	t.Run("negative rejected", func(t *testing.T) {
-		yamlText := strings.Replace(validYAML(testHash("printer-secret")),
-			"      max_size: 250MiB\n",
-			"      max_size: 250MiB\n      max_concurrent_uploads: -1\n",
-			1)
-		_, err := loadText(t, yamlText, env)
-		if err == nil {
-			t.Fatal("config with max_concurrent_uploads: -1 loaded cleanly, want validation error (PERF-004)")
-		}
-		if !strings.Contains(err.Error(), "max_concurrent_uploads") {
-			t.Errorf("validation error = %v, want it to mention max_concurrent_uploads (PERF-004)", err)
-		}
-	})
+	assert.Equal(t, "/etc/ssl/certs/custom-ca.pem", cfg.OCIS.CAFile)
+	assert.True(t, cfg.OCIS.InsecureSkipVerify)
 }

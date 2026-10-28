@@ -52,8 +52,10 @@ func NewLibreGraphClientWithHTTP(baseURL, username, token string, httpClient *ht
 		}
 	}
 
-	// Ensure baseURL ends with exactly one slash for proper joining
-	baseURL = strings.TrimRight(baseURL, "/") + "/"
+	// Trim trailing slashes from baseURL. The libregraph SDK request paths
+	// already start with "/", so a trailing slash would produce double-slash
+	// paths (e.g. /graph/v1.0//drives/...). See issue #105.
+	baseURL = strings.TrimRight(baseURL, "/")
 
 	// Parse and validate the base URL
 	parsedURL, err := url.Parse(baseURL)
@@ -270,14 +272,16 @@ func (c *libregraphClient) handleError(resp *http.Response, err error, context s
 
 // convertDrive converts a LibreGraph Drive to our internal Drive representation.
 func (c *libregraphClient) convertDrive(drive *libregraph.Drive) Drive {
-	// Extract WebDAV URL from the drive's webUrl if available
+	// Construct the WebDAV URL for this drive.
+	// oCIS serves drive/space content at /dav/spaces/<driveId>.
+	// The old code overwrote the webUrl path with /webdav (personal space),
+	// causing all uploads to land in the service user's personal space. See issue #107.
 	webDAVURL := ""
 	if drive.WebUrl != nil && *drive.WebUrl != "" {
-		// Convert web URL to WebDAV URL
 		webURL, err := url.Parse(*drive.WebUrl)
 		if err == nil {
-			// Replace the path with /webdav
-			webURL.Path = "/webdav"
+			// Replace the path with the drive-specific WebDAV endpoint
+			webURL.Path = "/dav/spaces/" + c.safeString(drive.Id)
 			webDAVURL = webURL.String()
 		}
 	}

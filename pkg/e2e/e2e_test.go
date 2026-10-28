@@ -5,17 +5,13 @@ package e2e
 
 import (
 	"bytes"
-	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -233,41 +229,4 @@ func TestNestedPathUpload(t *testing.T) {
 func TestCleanup(t *testing.T) {
 	// Clean up global state
 	resetMockState()
-}
-
-// Additional utility functions for E2E testing
-
-// WaitForServer waits for a server to become available
-func WaitForServer(url string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", url, 1*time.Second)
-		if err == nil {
-			conn.Close()
-			return nil
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return fmt.Errorf("server at %s did not become available within %v", url, timeout)
-}
-
-// CreateTestFile creates a test file with specified content
-func CreateTestFile(t *testing.T, content string) *os.File {
-	tmpFile, err := os.CreateTemp("", "e2e-test-*.txt")
-	require.NoError(t, err)
-
-	_, err = tmpFile.WriteString(content)
-	require.NoError(t, err)
-
-	_, err = tmpFile.Seek(0, 0)
-	require.NoError(t, err)
-
-	t.Cleanup(func() {
-		if tmpFile != nil {
-			tmpFile.Close()
-		}
-		os.Remove(tmpFile.Name())
-	})
-
-	return tmpFile
 }

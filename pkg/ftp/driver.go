@@ -276,6 +276,17 @@ func (at *AuthAttemptTracker) sweep() {
 	}
 }
 
+// MetricsRecorder is an optional interface for recording Prometheus metrics.
+// Implemented by the HTTP operations server. See issue #115.
+type MetricsRecorder interface {
+	IncrementUploadsTotal(status string)
+	IncrementUploadFailuresTotal(reason string)
+	AddUploadBytes(bytes uint64)
+	ObserveUploadDuration(duration time.Duration, status string)
+	IncrementFTPSessionTotal(status string)
+	SetFTPActiveSessions(count float64)
+}
+
 // BridgeDriver implements MainDriver interface
 // to handle FTP connections and provide authentication for oCIS bridge.
 type BridgeDriver struct {
@@ -286,6 +297,9 @@ type BridgeDriver struct {
 	// transferManagers holds one transfer manager per account, each with a
 	// WebDAV client built from that account's oCIS credentials.
 	transferManagers map[string]*transfer.TransferManager
+
+	// metrics, if set, records Prometheus metrics. See issue #115.
+	metrics MetricsRecorder
 
 	// Client management
 	activeConnections int64
@@ -317,6 +331,11 @@ type BridgeDriver struct {
 	// Rate limiting
 	connectionTracker  *ConnectionTracker
 	authAttemptTracker *AuthAttemptTracker
+
+	// authSemaphore bounds concurrent Argon2id password verifications.
+	// Each verification allocates ~64 MiB; without a bound, concurrent
+	// logins can exhaust memory (e.g. 8 logins = ~512 MiB). See issue #111.
+	authSemaphore chan struct{}
 
 	// Per-account upload concurrency caps (PERF-004): one semaphore channel
 	// per account username, created lazily with the account's configured
@@ -409,12 +428,30 @@ func NewBridgeDriver(
 		maxConnections:     cfg.Server.MaxConnections,
 		connectionTracker:  connTracker,
 		authAttemptTracker: authTracker,
-		ctx:                ctx,
-		cancel:             cancel,
-		shutdownChan:       make(chan struct{}),
+		authSemaphore:  make(chan struct{}, 4), // Max 4 concurrent Argon2id verifications
+		ctx:           ctx,
+		cancel:        cancel,
+		shutdownChan:  make(chan struct{}),
 	}
 	d.startTrackerJanitor()
 	return d
+}
+
+// recordUploadFailure records an upload failure in both the internal counter
+// and Prometheus metrics (if configured). See issue #115.
+func (d *BridgeDriver) recordUploadFailure(reason string, duration time.Duration) {
+	atomic.AddUint64(&d.uploadsFailed, 1)
+	if d.metrics != nil {
+		d.metrics.IncrementUploadsTotal("failure")
+		d.metrics.IncrementUploadFailuresTotal(reason)
+		d.metrics.ObserveUploadDuration(duration, "failure")
+	}
+}
+
+// SetMetricsRecorder sets the metrics recorder for Prometheus metrics.
+// Called during server initialization to wire up observability. See issue #115.
+func (d *BridgeDriver) SetMetricsRecorder(m MetricsRecorder) {
+	d.metrics = m
 }
 
 // trackerSweepInterval is how often the rate-limiting trackers are swept
@@ -480,6 +517,16 @@ func (d *BridgeDriver) AuthUser(cc ftpserver.ClientContext, user, password strin
 		}
 	}
 
+	// Bound concurrent Argon2id verifications to prevent memory exhaustion.
+	// Each verification allocates ~64 MiB; the semaphore limits this to 4
+	// concurrent verifications (~256 MiB max). See issue #111.
+	select {
+	case d.authSemaphore <- struct{}{}:
+		defer func() { <-d.authSemaphore }()
+	default:
+		return nil, fmt.Errorf("too many concurrent authentication attempts, try again later")
+	}
+
 	// Authenticate user
 	account, err := d.authenticateUser(user, password)
 	if err != nil {
@@ -487,6 +534,9 @@ func (d *BridgeDriver) AuthUser(cc ftpserver.ClientContext, user, password strin
 		// Record failed authentication attempt for rate limiting
 		if d.authAttemptTracker != nil {
 			d.authAttemptTracker.RecordAuthAttempt(clientIP, false)
+		}
+		if d.metrics != nil {
+			d.metrics.IncrementFTPSessionTotal("failure")
 		}
 		return nil, ErrInvalidCredentials
 	}
@@ -508,9 +558,16 @@ func (d *BridgeDriver) AuthUser(cc ftpserver.ClientContext, user, password strin
 		return nil, fmt.Errorf("drive resolution failed: %w", err)
 	}
 
-	// Create WebDAV client for this account
+	// Create WebDAV client for this account using the resolved drive's URL.
+	// Using the drive-specific URL ensures uploads land in the correct
+	// project space, not the service user's personal space. See issue #107.
+	webdavBaseURL := resolvedDrive.WebDAVURL
+	if webdavBaseURL == "" {
+		// Fallback to the global config if the drive didn't provide a URL
+		webdavBaseURL = d.cfg.OCIS.WebDAVURL
+	}
 	webdavClient := webdav.NewClientWithCredentials(
-		d.cfg.OCIS.WebDAVURL,
+		webdavBaseURL,
 		account.OCIS.Username,
 		account.AppToken,
 	)
@@ -549,6 +606,12 @@ func (d *BridgeDriver) AuthUser(cc ftpserver.ClientContext, user, password strin
 	// counter reaches max_connections (SEC-004).
 
 	d.obs.Log("info", fmt.Sprintf("FTP authentication successful for user %s (oCIS: %s)", user, account.OCIS.Username))
+
+	// Record session metric
+	if d.metrics != nil {
+		d.metrics.IncrementFTPSessionTotal("success")
+		d.metrics.SetFTPActiveSessions(float64(atomic.LoadInt64(&d.activeConnections)))
+	}
 
 	return clientDriver, nil
 }
@@ -657,6 +720,11 @@ func (d *BridgeDriver) ClientConnected(cc ftpserver.ClientContext) (string, erro
 	// Increment active connection counter
 	atomic.AddInt64(&d.activeConnections, 1)
 
+	// Update active sessions gauge
+	if d.metrics != nil {
+		d.metrics.SetFTPActiveSessions(float64(atomic.LoadInt64(&d.activeConnections)))
+	}
+
 	return "220 ocis-ftp-bridge ready", nil
 }
 
@@ -689,6 +757,11 @@ func (d *BridgeDriver) ClientDisconnected(cc ftpserver.ClientContext) {
 
 	// Decrement connection counter
 	atomic.AddInt64(&d.activeConnections, -1)
+
+	// Update active sessions gauge
+	if d.metrics != nil {
+		d.metrics.SetFTPActiveSessions(float64(atomic.LoadInt64(&d.activeConnections)))
+	}
 
 	d.obs.Log("info", fmt.Sprintf("FTP client disconnected (ID: %d, addr: %s)", cc.ID(), cc.RemoteAddr().String()))
 }
@@ -904,12 +977,15 @@ func (c *bridgeClientDriver) Rename(oldname, newname string) error {
 
 // Stat returns a FileInfo describing the named file.
 func (c *bridgeClientDriver) Stat(name string) (os.FileInfo, error) {
-	// For directories, return virtual directory info
-	if name == "/" || name == "" || name == "." {
-		return &virtualDir{name: "/"}, nil
+	// Virtual directory model: any path under the account root is a valid
+	// directory. This makes CWD succeed for any path, and MKD is a no-op
+	// (directories are created on-demand during upload). See issue #114.
+	cleanPath := filepath.Clean(name)
+	if cleanPath == "." || cleanPath == "/" {
+		cleanPath = "/"
 	}
-	// For files, return not found
-	return nil, os.ErrNotExist
+	// Return virtual directory info for any path
+	return &virtualDir{name: cleanPath}, nil
 }
 
 // Chmod changes the mode of the named file.
@@ -1147,7 +1223,7 @@ func (w *uploadWriter) Close() error {
 		delete(w.clientDriver.spoolUploads, w.uploadID)
 		w.clientDriver.mu.Unlock()
 
-		atomic.AddUint64(&w.clientDriver.bridgeDriver.uploadsFailed, 1)
+		w.clientDriver.bridgeDriver.recordUploadFailure("aborted", time.Since(w.spoolUpload.startTime))
 		return w.writeErr
 	}
 
@@ -1162,8 +1238,7 @@ func (w *uploadWriter) Close() error {
 			w.clientDriver.mu.Lock()
 			delete(w.clientDriver.spoolUploads, w.uploadID)
 			w.clientDriver.mu.Unlock()
-
-			atomic.AddUint64(&w.clientDriver.bridgeDriver.uploadsFailed, 1)
+			w.clientDriver.bridgeDriver.recordUploadFailure("finish_error", time.Since(w.spoolUpload.startTime))
 			return err
 		}
 
@@ -1182,8 +1257,7 @@ func (w *uploadWriter) Close() error {
 			w.clientDriver.mu.Lock()
 			delete(w.clientDriver.spoolUploads, w.uploadID)
 			w.clientDriver.mu.Unlock()
-
-			atomic.AddUint64(&w.clientDriver.bridgeDriver.uploadsFailed, 1)
+			w.clientDriver.bridgeDriver.recordUploadFailure("webdav_error", time.Since(w.spoolUpload.startTime))
 			return err
 		}
 
@@ -1198,6 +1272,14 @@ func (w *uploadWriter) Close() error {
 		atomic.AddUint64(&w.clientDriver.bridgeDriver.uploadsSuccess, 1)
 		if fileRef.Size > 0 {
 			atomic.AddUint64(&w.clientDriver.bridgeDriver.totalBytesUploaded, uint64(fileRef.Size))
+		}
+
+		// Record Prometheus metrics. See issue #115.
+		if w.clientDriver.bridgeDriver.metrics != nil {
+			w.clientDriver.bridgeDriver.metrics.IncrementUploadsTotal("success")
+			// #nosec G115 -- fileRef.Size is validated non-negative by spool manager
+			w.clientDriver.bridgeDriver.metrics.AddUploadBytes(uint64(fileRef.Size))
+			w.clientDriver.bridgeDriver.metrics.ObserveUploadDuration(time.Since(w.spoolUpload.startTime), "success")
 		}
 
 		// Clean up tracking
@@ -1218,7 +1300,7 @@ func (w *uploadWriter) Close() error {
 		delete(w.clientDriver.spoolUploads, w.uploadID)
 		w.clientDriver.mu.Unlock()
 
-		atomic.AddUint64(&w.clientDriver.bridgeDriver.uploadsFailed, 1)
+		w.clientDriver.bridgeDriver.recordUploadFailure("incomplete", time.Since(w.spoolUpload.startTime))
 		return err
 	}
 }
@@ -1247,28 +1329,54 @@ func (w *uploadWriter) commitToWebDAV(fileRef spool.FileRef) error {
 		return fmt.Errorf("failed to ensure parent directories: %w", err)
 	}
 
-	// Open the spooled file and stream it to WebDAV. The file must never be
-	// read fully into memory: a 50 MiB upload with up to max_connections
-	// concurrent sessions would otherwise buffer several GiB transiently and
-	// get the container OOM-killed (SEC-003).
-	spooledFile, err := os.Open(fileRef.Path)
-	if err != nil {
-		return fmt.Errorf("failed to open spooled file for WebDAV upload: %w", err)
-	}
-	defer spooledFile.Close()
+	// Upload to WebDAV with retry on 412 conflict for rename policy.
+	// Concurrent uploads of the same filename can race: both pick the same
+	// unique name before either writes to WebDAV. The loser gets a 412
+	// (If-None-Match) and should retry with the next unique name. See issue #110.
+	const maxRetries = 3
+	uploadPath := finalPath
+	isRenamePolicy := transfer.CollisionPolicy(w.clientDriver.account.Upload.CollisionPolicy) == transfer.CollisionPolicyRename
 
-	// Upload to WebDAV
-	// The collision policy was already applied during path resolution. Only the
-	// explicit "overwrite" policy may replace an existing object; for rename and
-	// reject the PUT carries If-None-Match so an object that appeared after
-	// resolution fails with a conflict instead of silently overwriting it.
-	overwrite := transfer.CollisionPolicy(w.clientDriver.account.Upload.CollisionPolicy) == transfer.CollisionPolicyOverwrite
-	if err := w.clientDriver.webdavClient.UploadStream(w.clientDriver.context, finalPath, spooledFile, fileRef.Size, overwrite); err != nil {
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		// Open the spooled file and stream it to WebDAV. The file must never be
+		// read fully into memory: a 50 MiB upload with up to max_connections
+		// concurrent sessions would otherwise buffer several GiB transiently and
+		// get the container OOM-killed (SEC-003).
+		spooledFile, err := os.Open(fileRef.Path)
+		if err != nil {
+			return fmt.Errorf("failed to open spooled file for WebDAV upload: %w", err)
+		}
+
+		// The collision policy was already applied during path resolution. Only the
+		// explicit "overwrite" policy may replace an existing object; for rename and
+		// reject the PUT carries If-None-Match so an object that appeared after
+		// resolution fails with a conflict instead of silently overwriting it.
+		overwrite := transfer.CollisionPolicy(w.clientDriver.account.Upload.CollisionPolicy) == transfer.CollisionPolicyOverwrite
+		err = w.clientDriver.webdavClient.UploadStream(w.clientDriver.context, uploadPath, spooledFile, fileRef.Size, overwrite)
+		spooledFile.Close()
+		if err == nil {
+			// Success - update the spool upload path if we retried
+			if attempt > 0 {
+				w.spoolUpload.path = uploadPath
+			}
+			return nil
+		}
+
+		// On conflict (412) with rename policy, retry with a new unique name
+		if isRenamePolicy && attempt < maxRetries-1 {
+			// Generate a new unique path by appending a counter
+			dir := filepath.Dir(uploadPath)
+			base := filepath.Base(uploadPath)
+			ext := filepath.Ext(base)
+			name := strings.TrimSuffix(base, ext)
+			uploadPath = filepath.Join(dir, fmt.Sprintf("%s-%d%s", name, attempt+2, ext))
+			continue
+		}
+
 		return fmt.Errorf("WebDAV upload failed: %w", err)
 	}
 
-	// Success - the file is now in oCIS
-	return nil
+	return fmt.Errorf("WebDAV upload failed after %d retries", maxRetries)
 }
 
 // =========================================================================
