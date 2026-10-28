@@ -19,7 +19,7 @@ func TestTransferManager_CalculateTargetPath(t *testing.T) {
 
 	// Add a target configuration
 	tm.AddTarget("testuser", TargetConfig{
-		DriveID:          "drive123",
+		DriveID:         "drive123",
 		Drive:           "MyDrive",
 		Root:            "/uploads",
 		CollisionPolicy: CollisionPolicyRename,
@@ -143,63 +143,63 @@ func TestTransferManager_SanitizeFilename(t *testing.T) {
 	tm := NewTransferManager()
 
 	testCases := []struct {
-		name       string
-		filename   string
-		expected   string
+		name        string
+		filename    string
+		expected    string
 		expectError bool
 	}{
 		{
-			name:       "simple filename",
-			filename:   "test.txt",
-			expected:   "test.txt",
+			name:        "simple filename",
+			filename:    "test.txt",
+			expected:    "test.txt",
 			expectError: false,
 		},
 		{
-			name:       "filename with spaces",
-			filename:   "my document.txt",
-			expected:   "my document.txt",
+			name:        "filename with spaces",
+			filename:    "my document.txt",
+			expected:    "my document.txt",
 			expectError: false,
 		},
 		{
-			name:       "filename with unicode",
-			filename:   "résumé.pdf",
-			expected:   "résumé.pdf",
+			name:        "filename with unicode",
+			filename:    "résumé.pdf",
+			expected:    "résumé.pdf",
 			expectError: false,
 		},
 		{
-			name:       "filename with dots",
-			filename:   "archive.tar.gz",
-			expected:   "archive.tar.gz",
+			name:        "filename with dots",
+			filename:    "archive.tar.gz",
+			expected:    "archive.tar.gz",
 			expectError: false,
 		},
 		{
-			name:       "filename with path",
-			filename:   "path/to/file.txt",
-			expected:   "file.txt",
+			name:        "filename with path",
+			filename:    "path/to/file.txt",
+			expected:    "file.txt",
 			expectError: false,
 		},
 		{
-			name:       "filename with traversal",
-			filename:   "../secret.txt",
-			expected:   "",
+			name:        "filename with traversal",
+			filename:    "../secret.txt",
+			expected:    "",
 			expectError: true,
 		},
 		{
-			name:       "empty filename",
-			filename:   "",
-			expected:   "",
+			name:        "empty filename",
+			filename:    "",
+			expected:    "",
 			expectError: true,
 		},
 		{
-			name:       "filename with control characters",
-			filename:   "test\x00.txt",
-			expected:   "test_.txt",
+			name:        "filename with control characters",
+			filename:    "test\x00.txt",
+			expected:    "test_.txt",
 			expectError: false,
 		},
 		{
-			name:       "filename with newline",
-			filename:   "test\n.txt",
-			expected:   "test_.txt",
+			name:        "filename with newline",
+			filename:    "test\n.txt",
+			expected:    "test_.txt",
 			expectError: false,
 		},
 	}
@@ -231,57 +231,57 @@ func TestTransferManager_NormalizeFTPPath(t *testing.T) {
 	tm := NewTransferManager()
 
 	testCases := []struct {
-		name       string
-		path       string
-		expected   string
+		name        string
+		path        string
+		expected    string
 		expectError bool
 	}{
 		{
-			name:       "simple path",
-			path:       "scans/daily",
-			expected:   "scans/daily",
+			name:        "simple path",
+			path:        "scans/daily",
+			expected:    "scans/daily",
 			expectError: false,
 		},
 		{
-			name:       "empty path",
-			path:       "",
-			expected:   "",
+			name:        "empty path",
+			path:        "",
+			expected:    "",
 			expectError: false,
 		},
 		{
-			name:       "root path",
-			path:       "/",
-			expected:   "",
+			name:        "root path",
+			path:        "/",
+			expected:    "",
 			expectError: false,
 		},
 		{
-			name:       "current directory",
-			path:       ".",
-			expected:   "",
+			name:        "current directory",
+			path:        ".",
+			expected:    "",
 			expectError: false,
 		},
 		{
-			name:       "path traversal",
-			path:       "../secret",
-			expected:   "",
+			name:        "path traversal",
+			path:        "../secret",
+			expected:    "",
 			expectError: true,
 		},
 		{
-			name:       "absolute path",
-			path:       "/absolute",
-			expected:   "",
+			name:        "absolute path",
+			path:        "/absolute",
+			expected:    "",
 			expectError: true,
 		},
 		{
-			name:       "path with multiple slashes",
-			path:       "scans//daily",
-			expected:   "scans/daily",
+			name:        "path with multiple slashes",
+			path:        "scans//daily",
+			expected:    "scans/daily",
 			expectError: false,
 		},
 		{
-			name:       "path with leading slashes",
-			path:       "///scans/daily",
-			expected:   "",
+			name:        "path with leading slashes",
+			path:        "///scans/daily",
+			expected:    "",
 			expectError: true, // should be rejected as absolute path
 		},
 	}
@@ -313,45 +313,45 @@ func TestTransferManager_ValidateTargetPath(t *testing.T) {
 	tm := NewTransferManager()
 
 	testCases := []struct {
-		name       string
-		targetPath string
-		targetRoot string
+		name        string
+		targetPath  string
+		targetRoot  string
 		expectError bool
 	}{
 		{
-			name:       "valid path within root",
-			targetPath: "/uploads/scans/file.txt",
-			targetRoot: "/uploads",
+			name:        "valid path within root",
+			targetPath:  "/uploads/scans/file.txt",
+			targetRoot:  "/uploads",
 			expectError: false,
 		},
 		{
-			name:       "valid path at root",
-			targetPath: "/uploads/file.txt",
-			targetRoot: "/uploads",
+			name:        "valid path at root",
+			targetPath:  "/uploads/file.txt",
+			targetRoot:  "/uploads",
 			expectError: false,
 		},
 		{
-			name:       "path outside root",
-			targetPath: "/other/file.txt",
-			targetRoot: "/uploads",
+			name:        "path outside root",
+			targetPath:  "/other/file.txt",
+			targetRoot:  "/uploads",
 			expectError: true,
 		},
 		{
-			name:       "path traversal outside root",
-			targetPath: "/uploads/../etc/passwd",
-			targetRoot: "/uploads",
+			name:        "path traversal outside root",
+			targetPath:  "/uploads/../etc/passwd",
+			targetRoot:  "/uploads",
 			expectError: true,
 		},
 		{
-			name:       "non-absolute target path",
-			targetPath: "uploads/scans/file.txt",
-			targetRoot: "/uploads",
+			name:        "non-absolute target path",
+			targetPath:  "uploads/scans/file.txt",
+			targetRoot:  "/uploads",
 			expectError: false,
 		},
 		{
-			name:       "non-absolute target root",
-			targetPath: "/uploads/scans/file.txt",
-			targetRoot: "uploads",
+			name:        "non-absolute target root",
+			targetPath:  "/uploads/scans/file.txt",
+			targetRoot:  "uploads",
 			expectError: false,
 		},
 	}
@@ -393,7 +393,7 @@ func TestEdgeCases(t *testing.T) {
 
 	// Add target configuration
 	tm.AddTarget("testuser", TargetConfig{
-		DriveID:          "drive123",
+		DriveID:         "drive123",
 		Drive:           "MyDrive",
 		Root:            "/uploads",
 		CollisionPolicy: CollisionPolicyRename,
@@ -401,63 +401,63 @@ func TestEdgeCases(t *testing.T) {
 	})
 
 	edgeCases := []struct {
-		name     string
-		ftpPath  string
-		filename string
+		name      string
+		ftpPath   string
+		filename  string
 		wantError bool
 	}{
 		{
-			name:     "dotfile",
-			ftpPath:  "",
-			filename: ".gitignore",
+			name:      "dotfile",
+			ftpPath:   "",
+			filename:  ".gitignore",
 			wantError: false,
 		},
 		{
-			name:     "multi-dot extension",
-			ftpPath:  "",
-			filename: "archive.tar.gz",
+			name:      "multi-dot extension",
+			ftpPath:   "",
+			filename:  "archive.tar.gz",
 			wantError: false,
 		},
 		{
-			name:     "filename with special chars",
-			ftpPath:  "",
-			filename: "file-with-dashes_and_underscores.txt",
+			name:      "filename with special chars",
+			ftpPath:   "",
+			filename:  "file-with-dashes_and_underscores.txt",
 			wantError: false,
 		},
 		{
-			name:     "filename with spaces and unicode",
-			ftpPath:  "",
-			filename: "my résumé (final).pdf",
+			name:      "filename with spaces and unicode",
+			ftpPath:   "",
+			filename:  "my résumé (final).pdf",
 			wantError: false,
 		},
 		{
-			name:     "deeply nested path",
-			ftpPath:  "a/b/c/d/e/f",
-			filename: "file.txt",
+			name:      "deeply nested path",
+			ftpPath:   "a/b/c/d/e/f",
+			filename:  "file.txt",
 			wantError: false,
 		},
 		{
-			name:     "path with windows separators",
-			ftpPath:  "path\\to\\file",
-			filename: "test.txt",
+			name:      "path with windows separators",
+			ftpPath:   "path\\to\\file",
+			filename:  "test.txt",
 			wantError: false,
 		},
 		{
-			name:     "path with mixed slashes",
-			ftpPath:  "path/to\\file",
-			filename: "test.txt",
+			name:      "path with mixed slashes",
+			ftpPath:   "path/to\\file",
+			filename:  "test.txt",
 			wantError: false,
 		},
 		{
-			name:     "null byte in filename",
-			ftpPath:  "",
-			filename: "test\x00.txt",
+			name:      "null byte in filename",
+			ftpPath:   "",
+			filename:  "test\x00.txt",
 			wantError: false,
 		},
 		{
-			name:     "filename only dots",
-			ftpPath:  "",
-			filename: "...",
+			name:      "filename only dots",
+			ftpPath:   "",
+			filename:  "...",
 			wantError: false,
 		},
 	}
@@ -497,7 +497,7 @@ func TestResolveCollisionPolicies(t *testing.T) {
 
 	// Add target configuration
 	tm.AddTarget("testuser", TargetConfig{
-		DriveID:          "drive123",
+		DriveID:         "drive123",
 		Drive:           "MyDrive",
 		Root:            "/uploads",
 		CollisionPolicy: CollisionPolicyRename,
@@ -605,7 +605,7 @@ func TestPathTraversalSecurity(t *testing.T) {
 
 	// Add target configuration
 	tm.AddTarget("testuser", TargetConfig{
-		DriveID:          "drive123",
+		DriveID:         "drive123",
 		Drive:           "MyDrive",
 		Root:            "/uploads",
 		CollisionPolicy: CollisionPolicyRename,
@@ -614,130 +614,130 @@ func TestPathTraversalSecurity(t *testing.T) {
 
 	// Test cases for path traversal attempts
 	traversalCases := []struct {
-		name     string
-		ftpPath  string
-		filename string
+		name      string
+		ftpPath   string
+		filename  string
 		wantError bool
 	}{
 		// Basic traversal attempts
 		{
-			name:     "simple dot-dot in path",
-			ftpPath:  "../etc",
-			filename: "passwd.txt",
+			name:      "simple dot-dot in path",
+			ftpPath:   "../etc",
+			filename:  "passwd.txt",
 			wantError: true,
 		},
 		{
-			name:     "dot-dot at start of filename",
-			ftpPath:  "",
-			filename: "../secret.txt",
+			name:      "dot-dot at start of filename",
+			ftpPath:   "",
+			filename:  "../secret.txt",
 			wantError: true,
 		},
 		{
-			name:     "dot-dot in middle of filename",
-			ftpPath:  "",
-			filename: "foo/../bar.txt",
+			name:      "dot-dot in middle of filename",
+			ftpPath:   "",
+			filename:  "foo/../bar.txt",
 			wantError: true,
 		},
 		{
-			name:     "dot-dot at end of filename",
-			ftpPath:  "",
-			filename: "foo/..",
+			name:      "dot-dot at end of filename",
+			ftpPath:   "",
+			filename:  "foo/..",
 			wantError: true,
 		},
 		// Absolute path attempts
 		{
-			name:     "unix absolute path in ftpPath",
-			ftpPath:  "/etc",
-			filename: "passwd.txt",
+			name:      "unix absolute path in ftpPath",
+			ftpPath:   "/etc",
+			filename:  "passwd.txt",
 			wantError: true,
 		},
 		{
-			name:     "windows absolute path in ftpPath",
-			ftpPath:  "\\Windows\\System32",
-			filename: "config.ini",
+			name:      "windows absolute path in ftpPath",
+			ftpPath:   "\\Windows\\System32",
+			filename:  "config.ini",
 			wantError: true,
 		},
 		{
-			name:     "absolute path in filename",
-			ftpPath:  "",
-			filename: "/etc/passwd",
+			name:      "absolute path in filename",
+			ftpPath:   "",
+			filename:  "/etc/passwd",
 			wantError: true,
 		},
 		// Windows-specific attacks
 		{
-			name:     "windows drive letter",
-			ftpPath:  "C:\\",
-			filename: "file.txt",
+			name:      "windows drive letter",
+			ftpPath:   "C:\\",
+			filename:  "file.txt",
 			wantError: true,
 		},
 		{
-			name:     "windows path separators",
-			ftpPath:  "..\\..\\etc",
-			filename: "passwd.txt",
+			name:      "windows path separators",
+			ftpPath:   "..\\..\\etc",
+			filename:  "passwd.txt",
 			wantError: true,
 		},
 		// Mixed attacks
 		{
-			name:     "unix slash then dot-dot",
-			ftpPath:  "/../etc",
-			filename: "passwd.txt",
+			name:      "unix slash then dot-dot",
+			ftpPath:   "/../etc",
+			filename:  "passwd.txt",
 			wantError: true,
 		},
 		{
-			name:     "dot-dot with trailing slash",
-			ftpPath:  "foo/../",
-			filename: "bar.txt",
+			name:      "dot-dot with trailing slash",
+			ftpPath:   "foo/../",
+			filename:  "bar.txt",
 			wantError: true,
 		},
 		{
-			name:     "multiple dot-dot sequences",
-			ftpPath:  "../../../etc",
-			filename: "passwd.txt",
+			name:      "multiple dot-dot sequences",
+			ftpPath:   "../../../etc",
+			filename:  "passwd.txt",
 			wantError: true,
 		},
 		// Nested traversal attempts
 		{
-			name:     "nested path with traversal",
-			ftpPath:  "a/b/../../c",
-			filename: "file.txt",
+			name:      "nested path with traversal",
+			ftpPath:   "a/b/../../c",
+			filename:  "file.txt",
 			wantError: true,
 		},
 		{
-			name:     "traversal then valid path",
-			ftpPath:  "../a/b/c",
-			filename: "file.txt",
+			name:      "traversal then valid path",
+			ftpPath:   "../a/b/c",
+			filename:  "file.txt",
 			wantError: true,
 		},
 		// Null byte and control character attacks
 		{
-			name:     "null byte in path",
-			ftpPath:  "foo\x00bar",
-			filename: "file.txt",
+			name:      "null byte in path",
+			ftpPath:   "foo\x00bar",
+			filename:  "file.txt",
 			wantError: false, // Null byte will be sanitized
 		},
 		{
-			name:     "control characters in filename",
-			ftpPath:  "",
-			filename: "file\x00\x01.txt",
+			name:      "control characters in filename",
+			ftpPath:   "",
+			filename:  "file\x00\x01.txt",
 			wantError: false, // Control chars will be replaced
 		},
 		// Valid cases that should NOT error
 		{
-			name:     "single dot in filename",
-			ftpPath:  "",
-			filename: ".hidden",
+			name:      "single dot in filename",
+			ftpPath:   "",
+			filename:  ".hidden",
 			wantError: false,
 		},
 		{
-			name:     "dots in extension",
-			ftpPath:  "",
-			filename: "file.tar.gz",
+			name:      "dots in extension",
+			ftpPath:   "",
+			filename:  "file.tar.gz",
 			wantError: false,
 		},
 		{
-			name:     "leading dots in filename",
-			ftpPath:  "",
-			filename: "...test.txt",
+			name:      "leading dots in filename",
+			ftpPath:   "",
+			filename:  "...test.txt",
 			wantError: false,
 		},
 	}
@@ -793,40 +793,40 @@ func TestValidateTargetPathEdgeCases(t *testing.T) {
 	tm := NewTransferManager()
 
 	edgeCases := []struct {
-		name       string
-		targetPath string
-		targetRoot string
+		name        string
+		targetPath  string
+		targetRoot  string
 		expectError bool
 	}{
 		// Root prefix matching edge cases
 		{
-			name:       "root is prefix but path continues differently",
-			targetPath: "/root2/file.txt",
-			targetRoot: "/root",
+			name:        "root is prefix but path continues differently",
+			targetPath:  "/root2/file.txt",
+			targetRoot:  "/root",
 			expectError: true, // /root2 should not match /root
 		},
 		{
-			name:       "root is prefix with dash",
-			targetPath: "/root-foo/file.txt",
-			targetRoot: "/root",
+			name:        "root is prefix with dash",
+			targetPath:  "/root-foo/file.txt",
+			targetRoot:  "/root",
 			expectError: true, // /root-foo should not match /root
 		},
 		{
-			name:       "exact root match",
-			targetPath: "/root",
-			targetRoot: "/root",
+			name:        "exact root match",
+			targetPath:  "/root",
+			targetRoot:  "/root",
 			expectError: false,
 		},
 		{
-			name:       "root with trailing slash",
-			targetPath: "/root/file.txt",
-			targetRoot: "/root/",
+			name:        "root with trailing slash",
+			targetPath:  "/root/file.txt",
+			targetRoot:  "/root/",
 			expectError: false,
 		},
 		{
-			name:       "path with multiple trailing slashes",
-			targetPath: "/root/file///txt",
-			targetRoot: "/root",
+			name:        "path with multiple trailing slashes",
+			targetPath:  "/root/file///txt",
+			targetRoot:  "/root",
 			expectError: false, // filepath.Clean will normalize
 		},
 	}
@@ -854,7 +854,7 @@ func TestProcessUploadIntegration(t *testing.T) {
 
 	// Add target configuration
 	tm.AddTarget("testuser", TargetConfig{
-		DriveID:          "drive123",
+		DriveID:         "drive123",
 		Drive:           "MyDrive",
 		Root:            "/uploads",
 		CollisionPolicy: CollisionPolicyRename,
@@ -935,7 +935,7 @@ func TestProcessUploadIntegration(t *testing.T) {
 		rejectTM := NewTransferManagerWithWebDAV(context.Background(),
 			newFakeWebDAVClient("/uploads/scans/test.txt"))
 		rejectTM.AddTarget("testuser", TargetConfig{
-			DriveID:          "drive123",
+			DriveID:         "drive123",
 			Drive:           "MyDrive",
 			Root:            "/uploads",
 			CollisionPolicy: CollisionPolicyReject,

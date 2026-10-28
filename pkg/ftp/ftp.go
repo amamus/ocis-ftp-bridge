@@ -38,14 +38,14 @@ func NewServer(driver ftpserver.MainDriver) Server {
 // Re-export only the extension points the bridge is expected to implement.
 // These aliases keep our architecture explicit without recreating FTP protocol APIs.
 type (
-	MainDriver          = ftpserver.MainDriver
-	ClientDriver        = ftpserver.ClientDriver
-	ClientContext       = ftpserver.ClientContext
-	FileTransfer        = ftpserver.FileTransfer
-	FileTransferError   = ftpserver.FileTransferError
-	Settings            = ftpserver.Settings
-	PortRange           = ftpserver.PortRange
-	TLSRequirement      = ftpserver.TLSRequirement
+	MainDriver        = ftpserver.MainDriver
+	ClientDriver      = ftpserver.ClientDriver
+	ClientContext     = ftpserver.ClientContext
+	FileTransfer      = ftpserver.FileTransfer
+	FileTransferError = ftpserver.FileTransferError
+	Settings          = ftpserver.Settings
+	PortRange         = ftpserver.PortRange
+	TLSRequirement    = ftpserver.TLSRequirement
 )
 
 // Authenticator is a bridge-side credential abstraction. It is deliberately
@@ -81,9 +81,9 @@ func (unsupportedAuthenticator) GetUserInfo(string) (UserInfo, error) {
 
 var (
 	ErrInvalidCredentials = errors.New("invalid FTP credentials")
-	ErrUserNotFound        = errors.New("user not found")
-	ErrUnauthorized        = errors.New("access denied")
-	ErrNotImplemented      = errors.New("FTP account mapping not implemented")
+	ErrUserNotFound       = errors.New("user not found")
+	ErrUnauthorized       = errors.New("access denied")
+	ErrNotImplemented     = errors.New("FTP account mapping not implemented")
 	// ErrOperationNotSupported is returned when an operation is not supported
 	ErrOperationNotSupported = errors.New("operation not supported")
 	// ErrTooManyConcurrentUploads is returned when an account already has the

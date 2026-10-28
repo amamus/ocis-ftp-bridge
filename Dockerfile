@@ -44,6 +44,11 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 # ============================================================================
 FROM alpine:3.20 AS runtime
 
+# Redeclare ARGs for use in the runtime stage labels
+ARG VERSION=1.0.0-dev
+ARG COMMIT_SHA=unknown
+ARG BUILD_DATE=unknown
+
 # Set labels for container metadata
 LABEL org.opencontainers.image.title="ocis-ftp-bridge" \
 	org.opencontainers.image.description="FTP to oCIS bridge service" \

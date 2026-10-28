@@ -21,10 +21,10 @@ var graphOpTimeout = 30 * time.Second
 
 // libregraphClient is the concrete implementation of Client using the official SDK.
 type libregraphClient struct {
-	apiClient *libregraph.APIClient
-	baseURL   string
-	username  string
-	token     string
+	apiClient  *libregraph.APIClient
+	baseURL    string
+	username   string
+	token      string
 	httpClient *http.Client
 }
 
@@ -65,13 +65,13 @@ func NewLibreGraphClientWithHTTP(baseURL, username, token string, httpClient *ht
 		config := &libregraph.Configuration{
 			HTTPClient: httpClient,
 			UserAgent:  "ocis-ftp-bridge/1.0",
-			Debug:     false,
+			Debug:      false,
 		}
 		return &libregraphClient{
-			apiClient:   libregraph.NewAPIClient(config),
-			baseURL:     baseURL,
-			username:    username,
-			token:       token,
+			apiClient:  libregraph.NewAPIClient(config),
+			baseURL:    baseURL,
+			username:   username,
+			token:      token,
 			httpClient: httpClient,
 		}
 	}
@@ -83,16 +83,16 @@ func NewLibreGraphClientWithHTTP(baseURL, username, token string, httpClient *ht
 		},
 		HTTPClient: httpClient,
 		UserAgent:  "ocis-ftp-bridge/1.0",
-		Debug:     false,
+		Debug:      false,
 	}
 
 	apiClient := libregraph.NewAPIClient(config)
 
 	return &libregraphClient{
-		apiClient:   apiClient,
-		baseURL:     baseURL,
-		username:    username,
-		token:       token,
+		apiClient:  apiClient,
+		baseURL:    baseURL,
+		username:   username,
+		token:      token,
 		httpClient: httpClient,
 	}
 }
@@ -115,7 +115,7 @@ func (c *libregraphClient) ResolveDrive(id string) (Drive, error) {
 		c.withAuth(ctx),
 		id,
 	).Execute()
-	
+
 	if err != nil {
 		return Drive{}, c.handleError(resp, err, "failed to resolve drive")
 	}
@@ -145,7 +145,7 @@ func (c *libregraphClient) ListDrives(userID string) ([]Drive, error) {
 	resp, httpResp, err := c.apiClient.MeDrivesApi.ListMyDrives(
 		c.withAuth(ctx),
 	).Execute()
-	
+
 	if err != nil {
 		return nil, c.handleError(httpResp, err, "failed to list drives")
 	}

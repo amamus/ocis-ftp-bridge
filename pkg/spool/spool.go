@@ -38,17 +38,17 @@ const (
 
 // Errors - now using the structured error framework
 var (
-	ErrInvalidSpoolDirectory  = errors.InvalidInput("invalid spool directory", nil)
-	ErrInvalidParameters      = errors.InvalidInput("invalid parameters", nil)
-	ErrEmptyData              = errors.InvalidInput("empty data", nil)
-	ErrFileTooLarge           = errors.InvalidInput("file too large", nil)
-	ErrPathTraversal          = errors.PathTraversal("path traversal in spool")
-	ErrNotImplemented         = errors.InternalError("operation not implemented", nil)
-	ErrUploadCancelled        = errors.InternalError("upload cancelled", nil)
-	ErrUploadIncomplete       = errors.InvalidInput("upload incomplete", nil)
+	ErrInvalidSpoolDirectory = errors.InvalidInput("invalid spool directory", nil)
+	ErrInvalidParameters     = errors.InvalidInput("invalid parameters", nil)
+	ErrEmptyData             = errors.InvalidInput("empty data", nil)
+	ErrFileTooLarge          = errors.InvalidInput("file too large", nil)
+	ErrPathTraversal         = errors.PathTraversal("path traversal in spool")
+	ErrNotImplemented        = errors.InternalError("operation not implemented", nil)
+	ErrUploadCancelled       = errors.InternalError("upload cancelled", nil)
+	ErrUploadIncomplete      = errors.InvalidInput("upload incomplete", nil)
 	ErrSpoolCapacityExceeded = errors.StorageFull("spool capacity exceeded")
-	ErrFileNotFound           = errors.NotFound("file", "unknown")
-	ErrDuplicateFile          = errors.AlreadyExists("file", "unknown")
+	ErrFileNotFound          = errors.NotFound("file", "unknown")
+	ErrDuplicateFile         = errors.AlreadyExists("file", "unknown")
 )
 
 // FileRef represents a reference to a spooled file.
@@ -252,8 +252,8 @@ func checkDirectoryWritable(dir string) error {
 // NewUploadManager creates a new upload manager.
 func NewUploadManager(spoolDir string, maxTotalSize uint64) UploadManager {
 	return &uploadManager{
-		spoolDir:       spoolDir,
-		maxTotalSize:   maxTotalSize,
+		spoolDir:      spoolDir,
+		maxTotalSize:  maxTotalSize,
 		activeUploads: make(map[string]*Upload),
 	}
 }
@@ -344,18 +344,18 @@ func (m *uploadManager) StartUpload(ctx context.Context, userID, filename, targe
 	uploadCtx, cancel := context.WithCancel(ctx)
 
 	upload := &Upload{
-		ID:            uploadID,
-		UserID:        userID,
-		Filename:      filename,
-		TargetPath:    targetPath,
-		TempFile:      tempFile,
-		TempPath:      tempFile.Name(),
-		Size:          expectedSize,
-		BytesReceived: 0,
-		StartedAt:     time.Now().UTC(),
+		ID:             uploadID,
+		UserID:         userID,
+		Filename:       filename,
+		TargetPath:     targetPath,
+		TempFile:       tempFile,
+		TempPath:       tempFile.Name(),
+		Size:           expectedSize,
+		BytesReceived:  0,
+		StartedAt:      time.Now().UTC(),
 		AccountMaxSize: accountMaxSize,
-		Cancel:        cancel,
-		Context:       uploadCtx,
+		Cancel:         cancel,
+		Context:        uploadCtx,
 	}
 
 	// Track the upload. Bytes are accounted as chunks are written in
@@ -478,14 +478,14 @@ func (m *uploadManager) FinishUpload(upload *Upload) (FileRef, error) {
 
 	// Create the file reference
 	fileRef := FileRef{
-		UserID:    upload.UserID,
-		FileID:    fileID,
-		Filename:  upload.Filename,
-		Size:      upload.BytesReceived,
-		Path:      finalPath,
-		CreatedAt: upload.StartedAt.Format("2006_01_02T15_04_05Z"),
+		UserID:     upload.UserID,
+		FileID:     fileID,
+		Filename:   upload.Filename,
+		Size:       upload.BytesReceived,
+		Path:       finalPath,
+		CreatedAt:  upload.StartedAt.Format("2006_01_02T15_04_05Z"),
 		TargetPath: upload.TargetPath,
-		Status:    FileStatusCommitted,
+		Status:     FileStatusCommitted,
 	}
 
 	// Remove from active uploads and release the accounted bytes. The spooled

@@ -14,31 +14,31 @@ import (
 type Client interface {
 	// Start initializes observability
 	Start() error
-	
+
 	// Stop shuts down observability
 	Stop() error
-	
+
 	// Logger returns the structured logger
 	Logger() *Logger
-	
+
 	// Log logs a message (deprecated, use structured logging)
 	Log(level, message string)
-	
+
 	// Debug logs a debug message with structured fields
 	Debug(msg string, args ...any)
-	
+
 	// Info logs an info message with structured fields
 	Info(msg string, args ...any)
-	
+
 	// Warn logs a warning message with structured fields
 	Warn(msg string, args ...any)
-	
+
 	// Error logs an error message with structured fields
 	Error(msg string, args ...any)
-	
+
 	// Metric records a metric
 	Metric(name, value string)
-	
+
 	// Trace starts a trace
 	Trace(name string) Context
 }
@@ -69,11 +69,11 @@ func New(cfg Config) (Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	if cfg.Debug {
 		logger.Debug("Observability: debug mode enabled")
 	}
-	
+
 	return &defaultClient{
 		logger: logger,
 		debug:  cfg.Debug,

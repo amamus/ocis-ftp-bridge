@@ -90,13 +90,13 @@ func TestInvalidConfigurations(t *testing.T) {
 	hash := testHash("secret")
 	base := validYAML(hash)
 	cases := map[string]string{
-		"bad url":          strings.Replace(base, "https://cloud.example.com", "://bad", 1),
-		"bad hash":         strings.Replace(base, hash, "$argon2id$broken", 1),
-		"traversal":        strings.Replace(base, "/Reception", "/Reception/../Other", 1),
-		"bad passive":      strings.Replace(base, "min_port: 30000", "min_port: 40000", 1),
-		"bad collision":    strings.Replace(base, "collision_policy: rename", "collision_policy: surprise", 1),
-		"relative spool":   strings.Replace(base, "/var/lib/ocis-ftp/spool", "relative/spool", 1),
-		"missing target":   strings.Replace(base, "drive: Incoming Scans", "drive: \"\"", 1),
+		"bad url":        strings.Replace(base, "https://cloud.example.com", "://bad", 1),
+		"bad hash":       strings.Replace(base, hash, "$argon2id$broken", 1),
+		"traversal":      strings.Replace(base, "/Reception", "/Reception/../Other", 1),
+		"bad passive":    strings.Replace(base, "min_port: 30000", "min_port: 40000", 1),
+		"bad collision":  strings.Replace(base, "collision_policy: rename", "collision_policy: surprise", 1),
+		"relative spool": strings.Replace(base, "/var/lib/ocis-ftp/spool", "relative/spool", 1),
+		"missing target": strings.Replace(base, "drive: Incoming Scans", "drive: \"\"", 1),
 		// max_size above math.MaxInt64 would overflow int64 conversions in the
 		// upload hot path and silently block all uploads for the account
 		"oversized max_size": strings.Replace(base, "max_size: 250MiB", "max_size: 9223372036854775808", 1),
@@ -108,13 +108,13 @@ func TestInvalidConfigurations(t *testing.T) {
 			}
 		})
 	}
-	
+
 	// Test invalid server listen addresses
 	addressCases := map[string]string{
-		"invalid port":         strings.Replace(base, `":21"`, `":99999"`, 1), // port > 65535
-		"invalid port 0":       strings.Replace(base, `":21"`, `":0"`, 1),    // port = 0
-		"invalid format":       strings.Replace(base, `":21"`, `"localhost"`, 1), // missing port
-		"invalid hostname":     strings.Replace(base, `":21"`, `"invalid host!:80"`, 1), // invalid hostname
+		"invalid port":     strings.Replace(base, `":21"`, `":99999"`, 1),           // port > 65535
+		"invalid port 0":   strings.Replace(base, `":21"`, `":0"`, 1),               // port = 0
+		"invalid format":   strings.Replace(base, `":21"`, `"localhost"`, 1),        // missing port
+		"invalid hostname": strings.Replace(base, `":21"`, `"invalid host!:80"`, 1), // invalid hostname
 	}
 	for name, body := range addressCases {
 		t.Run(name, func(t *testing.T) {
@@ -328,14 +328,14 @@ func TestValidateTLSConfig(t *testing.T) {
 		tmpDir := t.TempDir()
 		certFile := filepath.Join(tmpDir, "cert.crt")
 		keyFile := filepath.Join(tmpDir, "key.key")
-		
+
 		if err := os.WriteFile(certFile, []byte("invalid cert"), 0600); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(keyFile, []byte("invalid key"), 0600); err != nil {
 			t.Fatal(err)
 		}
-		
+
 		cfg := New()
 		cfg.Server.TLS.Enabled = true
 		cfg.Server.TLS.Cert = certFile
@@ -353,7 +353,7 @@ func TestValidateTLSConfig(t *testing.T) {
 		tmpDir := t.TempDir()
 		certFile := filepath.Join(tmpDir, "cert.crt")
 		keyFile := filepath.Join(tmpDir, "key.key")
-		
+
 		// Write invalid cert that would parse but be expired
 		// In a real test, we'd generate an actual expired cert
 		certPEM := `-----BEGIN CERTIFICATE-----
@@ -366,7 +366,7 @@ gBR9p7pY5dKW2M5xq2x7HmD4PjzAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEB
 CwUAA0EAqF0RrNkYLXD5lTz5Fz0P8WEvsVVNGTqGqL0vBnBGkCLYe5YcQwJy0f
 OWPfGxbutT0P2P902y1ACyDnQs=
 -----END CERTIFICATE-----`
-		
+
 		keyPEM := `-----BEGIN PRIVATE KEY-----
 MIIBPAIBAAJBAKHBfpEgcMFvMA0GCSqGSIb3DQEBCwUAMBExDzANBgNVBAMMBnRl
 c3RjYTAeFw0yMDEwMDEwMDAwMDBaFw0yMDEwMDEwMDAwMDBaMBExDzANBgNVBAMM
@@ -377,14 +377,14 @@ gBR9p7pY5dKW2M5xq2x7HmD4PjzAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEB
 CwUAA0EAqF0RrNkYLXD5lTz5Fz0P8WEvsVVNGTqGqL0vBnBGkCLYe5YcQwJy0f
 OWPfGxbutT0P2P902y1ACyDnQs=
 -----END PRIVATE KEY-----`
-		
+
 		if err := os.WriteFile(certFile, []byte(certPEM), 0600); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(keyFile, []byte(keyPEM), 0600); err != nil {
 			t.Fatal(err)
 		}
-		
+
 		cfg := New()
 		cfg.Server.TLS.Enabled = true
 		cfg.Server.TLS.Cert = certFile

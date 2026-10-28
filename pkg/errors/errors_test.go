@@ -72,7 +72,7 @@ func TestAppError_Is(t *testing.T) {
 	// Test with underlying errors
 	underlying := fmt.Errorf("underlying")
 	wrapped := Wrap(ErrCodeIO, "wrapped", underlying)
-	
+
 	if !wrapped.Is(underlying) {
 		t.Error("wrapped error should be equal to underlying error")
 	}

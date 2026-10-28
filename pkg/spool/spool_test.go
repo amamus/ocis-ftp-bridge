@@ -745,7 +745,7 @@ func TestConcurrentUploads(t *testing.T) {
 	uploads := make([]*Upload, uploadCount)
 
 	for i := 0; i < uploadCount; i++ {
-		upload, err := uploadManager.StartUpload(ctx, "testuser", 
+		upload, err := uploadManager.StartUpload(ctx, "testuser",
 			fmt.Sprintf("file%d.txt", i), "/target", 1000, 10*1024*1024)
 		require.NoError(t, err)
 		uploads[i] = upload
@@ -793,7 +793,7 @@ func TestPathTraversalInSpool(t *testing.T) {
 		{"testuser/../etc/passwd", true},
 		{"..", true},
 		{"./testuser", false}, // This is actually valid - path.Clean removes the ./
-		{"testuser", false},    // This is valid
+		{"testuser", false},   // This is valid
 	}
 
 	for _, tc := range testCases {

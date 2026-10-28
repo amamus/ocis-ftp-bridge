@@ -16,8 +16,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/spf13/afero"
 	ftpserver "github.com/fclairamb/ftpserverlib"
+	"github.com/spf13/afero"
 
 	"github.com/amamus/ocis-ftp-bridge/pkg/config"
 	"github.com/amamus/ocis-ftp-bridge/pkg/graph"
@@ -44,14 +44,14 @@ func extractClientIP(remoteAddr string) string {
 type ConnectionTracker struct {
 	mu            sync.Mutex
 	ipConnections map[string]int64 // IP -> connection count
-	maxPerIP     int
-	maxGlobal    int64
-	globalCount  int64
+	maxPerIP      int
+	maxGlobal     int64
+	globalCount   int64
 }
 
 // AuthAttemptTracker tracks authentication attempts per IP for rate limiting
 type AuthAttemptTracker struct {
-	mu               sync.Mutex
+	mu              sync.Mutex
 	ipAttempts      map[string]*authAttemptInfo // IP -> attempt tracking
 	maxAttempts     int
 	window          time.Duration
@@ -71,8 +71,8 @@ type authAttemptInfo struct {
 func newConnectionTracker(maxPerIP, maxGlobal int) *ConnectionTracker {
 	return &ConnectionTracker{
 		ipConnections: make(map[string]int64),
-		maxPerIP:     maxPerIP,
-		maxGlobal:    int64(maxGlobal),
+		maxPerIP:      maxPerIP,
+		maxGlobal:     int64(maxGlobal),
 	}
 }
 
@@ -91,10 +91,10 @@ func (ct *ConnectionTracker) AllowConnection(ip string) bool {
 	if ct == nil {
 		return true // No rate limiting configured
 	}
-	
+
 	ct.mu.Lock()
 	defer ct.mu.Unlock()
-	
+
 	// Check global limit (0 means unlimited)
 	if ct.maxGlobal > 0 && ct.globalCount >= ct.maxGlobal {
 		return false
@@ -105,7 +105,7 @@ func (ct *ConnectionTracker) AllowConnection(ip string) bool {
 	if ct.maxPerIP > 0 && exists && count >= int64(ct.maxPerIP) {
 		return false
 	}
-	
+
 	// Allow the connection
 	ct.ipConnections[ip] = count + 1
 	ct.globalCount++
@@ -117,10 +117,10 @@ func (ct *ConnectionTracker) ReleaseConnection(ip string) {
 	if ct == nil {
 		return
 	}
-	
+
 	ct.mu.Lock()
 	defer ct.mu.Unlock()
-	
+
 	if count, exists := ct.ipConnections[ip]; exists && count > 0 {
 		count--
 		if count == 0 {
@@ -158,10 +158,10 @@ func (at *AuthAttemptTracker) IsIPLockedOut(ip string) bool {
 	if at == nil {
 		return false // No rate limiting configured
 	}
-	
+
 	at.mu.Lock()
 	defer at.mu.Unlock()
-	
+
 	if info, exists := at.ipAttempts[ip]; exists {
 		if info.lockedOut {
 			// Check if lockout has expired
@@ -172,14 +172,14 @@ func (at *AuthAttemptTracker) IsIPLockedOut(ip string) bool {
 			delete(at.ipAttempts, ip)
 			return false
 		}
-		
+
 		// Also check if the attempt window has expired (even without lockout)
 		if !info.firstFail.IsZero() && time.Since(info.firstFail) > at.window {
 			// Window expired, clean up
 			delete(at.ipAttempts, ip)
 			return false
 		}
-		
+
 		// If not locked out and window hasn't expired, check if we're still in lockout state
 		// This handles the case where the window expired but we haven't cleaned up yet
 		if !info.firstFail.IsZero() && info.count >= at.maxAttempts {
@@ -203,10 +203,10 @@ func (at *AuthAttemptTracker) RecordAuthAttempt(ip string, success bool) bool {
 	if at == nil {
 		return true // No rate limiting configured
 	}
-	
+
 	at.mu.Lock()
 	defer at.mu.Unlock()
-	
+
 	info, exists := at.ipAttempts[ip]
 	if success {
 		// Drop the tracking entry entirely so every source IP that ever
@@ -223,16 +223,16 @@ func (at *AuthAttemptTracker) RecordAuthAttempt(ip string, success bool) bool {
 		}
 		at.ipAttempts[ip] = info
 	}
-	
+
 	// For failed attempts
 	info.count++
 	info.lastAttempt = time.Now()
-	
+
 	// Check if we need to start lockout tracking
 	if info.firstFail.IsZero() {
 		info.firstFail = time.Now()
 	}
-	
+
 	// Check if we've reached or exceeded the limit within the window
 	// Lock out when count >= maxAttempts (i.e., allow maxAttempts-1 failed attempts)
 	if info.count >= at.maxAttempts {
@@ -247,7 +247,7 @@ func (at *AuthAttemptTracker) RecordAuthAttempt(ip string, success bool) bool {
 		info.count = 1
 		info.firstFail = time.Now()
 	}
-	
+
 	return true
 }
 
@@ -306,9 +306,9 @@ type BridgeDriver struct {
 	maxConnections    int
 
 	// Metrics
-	uploadsTotal     uint64
-	uploadsSuccess   uint64
-	uploadsFailed    uint64
+	uploadsTotal       uint64
+	uploadsSuccess     uint64
+	uploadsFailed      uint64
 	totalBytesUploaded uint64
 
 	// Account management
@@ -323,8 +323,13 @@ type BridgeDriver struct {
 	// per-session context when the client disconnects.
 	clients map[uint32]*bridgeClientDriver
 
+	// allowedConnections tracks connection IDs that were granted a slot
+	// by the connection tracker, so ClientDisconnected only releases
+	// slots that were actually acquired. See issue #116.
+	allowedConnections map[uint32]bool
+
 	// Rate limiting
-	connectionTracker *ConnectionTracker
+	connectionTracker  *ConnectionTracker
 	authAttemptTracker *AuthAttemptTracker
 
 	// authSemaphore bounds concurrent Argon2id password verifications.
@@ -356,7 +361,6 @@ type BridgeDriver struct {
 
 // NewBridgeDriver creates a new bridge FTP server driver.
 
-
 func NewBridgeDriver(
 	cfg *config.Config,
 	obs observability.Client,
@@ -387,7 +391,7 @@ func NewBridgeDriver(
 		)
 		transferMgr := transfer.NewTransferManagerWithWebDAV(ctx, webdavClient)
 		transferMgr.AddTarget(account.Username, transfer.TargetConfig{
-			DriveID:          account.Target.DriveID,
+			DriveID:         account.Target.DriveID,
 			Drive:           account.Target.Drive,
 			Root:            account.Target.Root,
 			CollisionPolicy: transfer.CollisionPolicy(account.Upload.CollisionPolicy),
@@ -399,7 +403,7 @@ func NewBridgeDriver(
 	// Initialize rate limiting trackers
 	var connTracker *ConnectionTracker
 	var authTracker *AuthAttemptTracker
-	
+
 	if cfg.Server.RateLimiting.TrackFailedAttempts {
 		connTracker = newConnectionTracker(
 			cfg.Server.RateLimiting.MaxConnectionsPerIP,
@@ -413,15 +417,16 @@ func NewBridgeDriver(
 	}
 
 	d := &BridgeDriver{
-		cfg:           cfg,
-		obs:          obs,
-		spoolManager:  spoolManager,
+		cfg:                cfg,
+		obs:                obs,
+		spoolManager:       spoolManager,
 		transferManagers:   transferMgrs,
-		accounts:      accounts,
-		driveCache:    make(map[string]driveCacheEntry),
-		clients:       make(map[uint32]*bridgeClientDriver),
-		maxConnections: cfg.Server.MaxConnections,
-		connectionTracker: connTracker,
+		accounts:           accounts,
+		driveCache:         make(map[string]driveCacheEntry),
+		clients:            make(map[uint32]*bridgeClientDriver),
+		allowedConnections: make(map[uint32]bool),
+		maxConnections:     cfg.Server.MaxConnections,
+		connectionTracker:  connTracker,
 		authAttemptTracker: authTracker,
 		authSemaphore:  make(chan struct{}, 4), // Max 4 concurrent Argon2id verifications
 		ctx:           ctx,
@@ -569,15 +574,15 @@ func (d *BridgeDriver) AuthUser(cc ftpserver.ClientContext, user, password strin
 
 	// Create client-specific driver
 	clientDriver := &bridgeClientDriver{
-		bridgeDriver:   d,
-		account:        account,
-		resolvedDrive:  &resolvedDrive,
-		user:           user,
-		webdavClient:   webdavClient,
-		spoolUploads:   make(map[string]*spoolUpload),
-		uploadCounter:  0,
-		context:        context.Background(),
-		cancel:         func() {},
+		bridgeDriver:  d,
+		account:       account,
+		resolvedDrive: &resolvedDrive,
+		user:          user,
+		webdavClient:  webdavClient,
+		spoolUploads:  make(map[string]*spoolUpload),
+		uploadCounter: 0,
+		context:       context.Background(),
+		cancel:        func() {},
 	}
 
 	// Create the session context derived from the driver lifecycle so the
@@ -640,35 +645,35 @@ func (d *BridgeDriver) GetSettings() (*ftpserver.Settings, error) {
 	}
 
 	settings := &ftpserver.Settings{
-		ListenAddr:       d.cfg.Server.Listen,
-		PublicHost:      d.cfg.Server.Passive.PublicIP,
-		IdleTimeout:     300, // 5 minutes
+		ListenAddr:        d.cfg.Server.Listen,
+		PublicHost:        d.cfg.Server.Passive.PublicIP,
+		IdleTimeout:       300, // 5 minutes
 		ConnectionTimeout: 60,
 		PassiveTransferPortRange: ftpserver.PortRange{
 			Start: d.cfg.Server.Passive.MinPort,
 			End:   d.cfg.Server.Passive.MaxPort,
 		},
-		DisableMLSD:           false,
-		DisableMLST:           false,
-		DisableMFMT:           true, // Disable features not needed for printers
-		DisableSTAT:           true,
-		DisableSYST:           false,
+		DisableMLSD:             false,
+		DisableMLST:             false,
+		DisableMFMT:             true, // Disable features not needed for printers
+		DisableSTAT:             true,
+		DisableSYST:             false,
 		ActiveTransferPortNon20: true,
-		DefaultTransferType:   ftpserver.TransferTypeBinary,
-		TLSRequired:           func() ftpserver.TLSRequirement {
+		DefaultTransferType:     ftpserver.TransferTypeBinary,
+		TLSRequired: func() ftpserver.TLSRequirement {
 			if d.cfg.Server.TLS.Enabled {
 				return ftpserver.TLSRequirement(1) // Required = 1
 			}
 			return ftpserver.TLSRequirement(0) // ClearOrEncrypted = 0
 		}(),
-		DisableActiveMode:     !d.cfg.Server.AllowActiveMode,
+		DisableActiveMode: !d.cfg.Server.AllowActiveMode,
 		// SEC-005: require the data-connection peer IP to match the control
 		// connection peer IP for both active and passive transfers. Set
 		// explicitly instead of relying on the library's zero value.
 		ActiveConnectionsCheck: ftpserver.IPMatchRequired,
 		PasvConnectionsCheck:   ftpserver.IPMatchRequired,
-		DisableSite:           true,
-		DisableLISTArgs:       true,
+		DisableSite:            true,
+		DisableLISTArgs:        true,
 	}
 	return settings, nil
 }
@@ -706,6 +711,12 @@ func (d *BridgeDriver) ClientConnected(cc ftpserver.ClientContext) (string, erro
 		return "", fmt.Errorf("connection limit reached for this IP")
 	}
 
+	// Track that this connection was granted a slot, so ClientDisconnected
+	// only releases slots that were actually acquired. See issue #116.
+	d.mu.Lock()
+	d.allowedConnections[cc.ID()] = true
+	d.mu.Unlock()
+
 	// Increment active connection counter
 	atomic.AddInt64(&d.activeConnections, 1)
 
@@ -728,13 +739,19 @@ func (d *BridgeDriver) ClientDisconnected(cc ftpserver.ClientContext) {
 	if registered {
 		delete(d.clients, cc.ID())
 	}
+	// Only release the connection slot if it was actually acquired.
+	// Rejected connections (limit reached) never held a slot. See issue #116.
+	_, wasAllowed := d.allowedConnections[cc.ID()]
+	if wasAllowed {
+		delete(d.allowedConnections, cc.ID())
+	}
 	d.mu.Unlock()
 	if registered {
 		clientDriver.cancel()
 	}
 
-	// Release connection slot
-	if d.connectionTracker != nil {
+	// Release connection slot only if it was granted
+	if wasAllowed && d.connectionTracker != nil {
 		d.connectionTracker.ReleaseConnection(clientIP)
 	}
 
@@ -778,16 +795,16 @@ func (d *BridgeDriver) IsShuttingDown() bool {
 // bridgeClientDriver handles FTP client sessions and implements ClientDriverExtensionFileTransfer
 // to provide custom file upload handling without implementing the full afero.Fs interface.
 type bridgeClientDriver struct {
-	bridgeDriver *BridgeDriver
-	account      *config.AccountConfig
+	bridgeDriver  *BridgeDriver
+	account       *config.AccountConfig
 	resolvedDrive *graph.Drive
-	user         string
-	webdavClient webdav.Client
+	user          string
+	webdavClient  webdav.Client
 
 	// Upload tracking
-	spoolUploads   map[string]*spoolUpload
-	uploadCounter  uint64
-	mu             sync.Mutex
+	spoolUploads  map[string]*spoolUpload
+	uploadCounter uint64
+	mu            sync.Mutex
 
 	// Session management
 	context context.Context
@@ -889,7 +906,7 @@ type uploadFileInfo struct {
 
 func (fi *uploadFileInfo) Name() string       { return fi.name }
 func (fi *uploadFileInfo) Size() int64        { return fi.size }
-func (fi *uploadFileInfo) Mode() os.FileMode   { return 0644 }
+func (fi *uploadFileInfo) Mode() os.FileMode  { return 0644 }
 func (fi *uploadFileInfo) ModTime() time.Time { return time.Now() }
 func (fi *uploadFileInfo) IsDir() bool        { return false }
 func (fi *uploadFileInfo) Sys() interface{}   { return nil }
@@ -994,7 +1011,7 @@ func (c *bridgeClientDriver) Chtimes(name string, atime time.Time, mtime time.Ti
 func (c *bridgeClientDriver) generateUploadID() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	
+
 	c.uploadCounter++
 	return fmt.Sprintf("%s-%d-%d", c.user, c.uploadCounter, time.Now().UnixNano())
 }
@@ -1074,7 +1091,7 @@ func (c *bridgeClientDriver) handleUploadOpen(path string) (*uploadWriter, error
 	}
 	transferResult := transferMgr.ProcessUpload(request)
 	if !transferResult.Success {
-		c.bridgeDriver.obs.Log("warn", fmt.Sprintf("Transfer processing failed for user %s, path %s: %v", 
+		c.bridgeDriver.obs.Log("warn", fmt.Sprintf("Transfer processing failed for user %s, path %s: %v",
 			c.user, path, transferResult.Error))
 		return nil, transferResult.Error
 	}
@@ -1094,9 +1111,9 @@ func (c *bridgeClientDriver) handleUploadOpen(path string) (*uploadWriter, error
 	upload, err := uploadManager.StartUpload(
 		c.context,
 		c.user,
-		transferResult.Filename, // final filename (may be modified for collision handling)
-		transferResult.TargetPath, // final target path
-		-1, // unknown size initially, will be updated as we receive data
+		transferResult.Filename,          // final filename (may be modified for collision handling)
+		transferResult.TargetPath,        // final target path
+		-1,                               // unknown size initially, will be updated as we receive data
 		uint64(c.account.Upload.MaxSize), // account max size
 	)
 	if err != nil {
@@ -1216,12 +1233,11 @@ func (w *uploadWriter) Close() error {
 		fileRef, err := w.clientDriver.bridgeDriver.spoolManager.GetUploadManager().FinishUpload(w.upload)
 		if err != nil {
 			w.clientDriver.bridgeDriver.obs.Log("error", fmt.Sprintf("Upload finish failed for user %s, upload %s: %v", w.clientDriver.user, w.uploadID, err))
-			
+
 			// Clean up the spool upload tracking
 			w.clientDriver.mu.Lock()
 			delete(w.clientDriver.spoolUploads, w.uploadID)
 			w.clientDriver.mu.Unlock()
-			
 			w.clientDriver.bridgeDriver.recordUploadFailure("finish_error", time.Since(w.spoolUpload.startTime))
 			return err
 		}
@@ -1236,12 +1252,11 @@ func (w *uploadWriter) Close() error {
 			// WebDAV commit failed - clean up spool file and return error
 			w.clientDriver.bridgeDriver.spoolManager.DeleteByPath(fileRef.Path)
 			w.clientDriver.bridgeDriver.obs.Log("error", fmt.Sprintf("WebDAV commit failed for user %s, upload %s: %v", w.clientDriver.user, w.uploadID, err))
-			
+
 			// Clean up tracking
 			w.clientDriver.mu.Lock()
 			delete(w.clientDriver.spoolUploads, w.uploadID)
 			w.clientDriver.mu.Unlock()
-			
 			w.clientDriver.bridgeDriver.recordUploadFailure("webdav_error", time.Since(w.spoolUpload.startTime))
 			return err
 		}
@@ -1462,7 +1477,7 @@ func (d *BridgeDriver) storeDriveResolution(username string, drive graph.Drive) 
 func (d *BridgeDriver) resolveDriveFresh(account *config.AccountConfig) (graph.Drive, error) {
 	// Use the account's oCIS credentials
 	client := graph.NewClientWithCredentials(d.cfg.OCIS.GraphURL, account.OCIS.Username, account.AppToken)
-	
+
 	// Try to resolve by drive_id first
 	if account.Target.DriveID != "" {
 		drive, err := client.ResolveDrive(account.Target.DriveID)
@@ -1515,7 +1530,7 @@ type virtualDir struct {
 
 func (d *virtualDir) Name() string       { return d.name }
 func (d *virtualDir) Size() int64        { return 0 }
-func (d *virtualDir) Mode() os.FileMode   { return os.ModeDir | 0755 }
+func (d *virtualDir) Mode() os.FileMode  { return os.ModeDir | 0755 }
 func (d *virtualDir) ModTime() time.Time { return time.Now() }
 func (d *virtualDir) IsDir() bool        { return true }
 func (d *virtualDir) Sys() interface{}   { return nil }
@@ -1542,5 +1557,5 @@ func (d *virtualDir) Sys() interface{}   { return nil }
 
 var (
 	ErrServerShuttingDown = fmt.Errorf("server is shutting down")
-	ErrUploadCancelled     = fmt.Errorf("upload cancelled")
+	ErrUploadCancelled    = fmt.Errorf("upload cancelled")
 )

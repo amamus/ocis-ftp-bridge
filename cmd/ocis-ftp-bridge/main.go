@@ -56,7 +56,7 @@ func main() {
 		Debug:  cfg.Observability.Debug,
 		Logger: cfg.Observability.Logger,
 	}
-	
+
 	obs, err := observability.New(obsConfig)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: failed to initialize observability: %v\n", err)

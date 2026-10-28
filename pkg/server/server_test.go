@@ -53,6 +53,20 @@ func testConfig(t *testing.T) *config.Config {
 	cfg.Server.TLS.Enabled = false
 	cfg.Spool.Directory = t.TempDir()
 	cfg.HTTP.Address = "127.0.0.1:0"
+	// At least one account is required (issue #116)
+	t.Setenv("TEST_SERVER_APP_TOKEN", "test-token")
+	cfg.Accounts = []config.AccountConfig{
+		{
+			Username:     "test-user",
+			PasswordHash: "$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+			OCIS: config.AccountOCISConfig{
+				Username:    "test-user",
+				AppTokenEnv: "TEST_SERVER_APP_TOKEN",
+			},
+			Target: config.TargetConfig{DriveID: "test-drive", Root: "/"},
+			Upload: config.UploadConfig{CollisionPolicy: "rename", MaxSize: 1024 * 1024},
+		},
+	}
 	return cfg
 }
 

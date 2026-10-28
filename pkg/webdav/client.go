@@ -449,8 +449,8 @@ func (c *webdavClient) GetFileInfo(ctx context.Context, path string) (FileInfo, 
 		// In a full implementation, we would parse the XML response
 		// For now, return basic info
 		return FileInfo{
-			Path:          path,
-			IsDirectory:   strings.HasSuffix(normalizedPath, "/"),
+			Path:         path,
+			IsDirectory:  strings.HasSuffix(normalizedPath, "/"),
 			LastModified: time.Now().UTC().Format(time.RFC3339),
 		}, nil
 	}

@@ -18,7 +18,7 @@ import (
 
 // Test scenarios from Issue #11 requirements:
 // - Plain FTP upload succeeds
-// - Explicit FTPS upload succeeds  
+// - Explicit FTPS upload succeeds
 // - Binary file checksum matches after round trip
 // - Nested path upload succeeds
 // - Same filename with `rename` preserves both objects
@@ -156,7 +156,7 @@ func MockOCIS() (*httptest.Server, *httptest.Server, error) {
 func TestBinaryFileChecksum(t *testing.T) {
 	// Create test data with binary content
 	originalData := []byte("This is a test file for checksum verification\nwith binary data: \x00\x01\x02\xFF\xFE\xFD\n")
-	
+
 	// Simulate upload and download through mock WebDAV
 	webdavServer, _, err := MockOCIS()
 	require.NoError(t, err)
@@ -170,15 +170,15 @@ func TestBinaryFileChecksum(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
 	defer resp.Body.Close()
-	
+
 	// Download the file
 	resp, err = http.Get(uploadURL)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	
+
 	downloadedData, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	
+
 	// Verify checksum - binary data should match exactly
 	require.Equal(t, originalData, downloadedData, "Binary data should match exactly")
 }
@@ -213,13 +213,13 @@ func TestNestedPathUpload(t *testing.T) {
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusCreated, resp.StatusCode)
-	
+
 	// Verify file exists
 	resp, err = http.Get(uploadURL)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	
+
 	downloadedData, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	require.Equal(t, testData, downloadedData)
