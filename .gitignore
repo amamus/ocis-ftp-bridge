@@ -1,6 +1,4 @@
 /ocis-ftp-bridge
-/1p-*
-/1x
 
 # SBOM generation tools (local development)
 /.bin/
