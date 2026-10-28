@@ -276,6 +276,17 @@ func (at *AuthAttemptTracker) sweep() {
 	}
 }
 
+// MetricsRecorder is an optional interface for recording Prometheus metrics.
+// Implemented by the HTTP operations server. See issue #115.
+type MetricsRecorder interface {
+	IncrementUploadsTotal(status string)
+	IncrementUploadFailuresTotal(reason string)
+	AddUploadBytes(bytes uint64)
+	ObserveUploadDuration(duration time.Duration, status string)
+	IncrementFTPSessionTotal(status string)
+	SetFTPActiveSessions(count float64)
+}
+
 // BridgeDriver implements MainDriver interface
 // to handle FTP connections and provide authentication for oCIS bridge.
 type BridgeDriver struct {
@@ -286,6 +297,9 @@ type BridgeDriver struct {
 	// transferManagers holds one transfer manager per account, each with a
 	// WebDAV client built from that account's oCIS credentials.
 	transferManagers map[string]*transfer.TransferManager
+
+	// metrics, if set, records Prometheus metrics. See issue #115.
+	metrics MetricsRecorder
 
 	// Client management
 	activeConnections int64
@@ -418,6 +432,23 @@ func NewBridgeDriver(
 	return d
 }
 
+// recordUploadFailure records an upload failure in both the internal counter
+// and Prometheus metrics (if configured). See issue #115.
+func (d *BridgeDriver) recordUploadFailure(reason string, duration time.Duration) {
+	atomic.AddUint64(&d.uploadsFailed, 1)
+	if d.metrics != nil {
+		d.metrics.IncrementUploadsTotal("failure")
+		d.metrics.IncrementUploadFailuresTotal(reason)
+		d.metrics.ObserveUploadDuration(duration, "failure")
+	}
+}
+
+// SetMetricsRecorder sets the metrics recorder for Prometheus metrics.
+// Called during server initialization to wire up observability. See issue #115.
+func (d *BridgeDriver) SetMetricsRecorder(m MetricsRecorder) {
+	d.metrics = m
+}
+
 // trackerSweepInterval is how often the rate-limiting trackers are swept
 // for expired entries (SEC-012).
 const trackerSweepInterval = time.Minute
@@ -499,6 +530,9 @@ func (d *BridgeDriver) AuthUser(cc ftpserver.ClientContext, user, password strin
 		if d.authAttemptTracker != nil {
 			d.authAttemptTracker.RecordAuthAttempt(clientIP, false)
 		}
+		if d.metrics != nil {
+			d.metrics.IncrementFTPSessionTotal("failure")
+		}
 		return nil, ErrInvalidCredentials
 	}
 
@@ -567,6 +601,12 @@ func (d *BridgeDriver) AuthUser(cc ftpserver.ClientContext, user, password strin
 	// counter reaches max_connections (SEC-004).
 
 	d.obs.Log("info", fmt.Sprintf("FTP authentication successful for user %s (oCIS: %s)", user, account.OCIS.Username))
+
+	// Record session metric
+	if d.metrics != nil {
+		d.metrics.IncrementFTPSessionTotal("success")
+		d.metrics.SetFTPActiveSessions(float64(atomic.LoadInt64(&d.activeConnections)))
+	}
 
 	return clientDriver, nil
 }
@@ -669,6 +709,11 @@ func (d *BridgeDriver) ClientConnected(cc ftpserver.ClientContext) (string, erro
 	// Increment active connection counter
 	atomic.AddInt64(&d.activeConnections, 1)
 
+	// Update active sessions gauge
+	if d.metrics != nil {
+		d.metrics.SetFTPActiveSessions(float64(atomic.LoadInt64(&d.activeConnections)))
+	}
+
 	return "220 ocis-ftp-bridge ready", nil
 }
 
@@ -695,6 +740,11 @@ func (d *BridgeDriver) ClientDisconnected(cc ftpserver.ClientContext) {
 
 	// Decrement connection counter
 	atomic.AddInt64(&d.activeConnections, -1)
+
+	// Update active sessions gauge
+	if d.metrics != nil {
+		d.metrics.SetFTPActiveSessions(float64(atomic.LoadInt64(&d.activeConnections)))
+	}
 
 	d.obs.Log("info", fmt.Sprintf("FTP client disconnected (ID: %d, addr: %s)", cc.ID(), cc.RemoteAddr().String()))
 }
@@ -1153,7 +1203,7 @@ func (w *uploadWriter) Close() error {
 		delete(w.clientDriver.spoolUploads, w.uploadID)
 		w.clientDriver.mu.Unlock()
 
-		atomic.AddUint64(&w.clientDriver.bridgeDriver.uploadsFailed, 1)
+		w.clientDriver.bridgeDriver.recordUploadFailure("aborted", time.Since(w.spoolUpload.startTime))
 		return w.writeErr
 	}
 
@@ -1169,7 +1219,7 @@ func (w *uploadWriter) Close() error {
 			delete(w.clientDriver.spoolUploads, w.uploadID)
 			w.clientDriver.mu.Unlock()
 			
-			atomic.AddUint64(&w.clientDriver.bridgeDriver.uploadsFailed, 1)
+			w.clientDriver.bridgeDriver.recordUploadFailure("finish_error", time.Since(w.spoolUpload.startTime))
 			return err
 		}
 
@@ -1189,7 +1239,7 @@ func (w *uploadWriter) Close() error {
 			delete(w.clientDriver.spoolUploads, w.uploadID)
 			w.clientDriver.mu.Unlock()
 			
-			atomic.AddUint64(&w.clientDriver.bridgeDriver.uploadsFailed, 1)
+			w.clientDriver.bridgeDriver.recordUploadFailure("webdav_error", time.Since(w.spoolUpload.startTime))
 			return err
 		}
 
@@ -1204,6 +1254,14 @@ func (w *uploadWriter) Close() error {
 		atomic.AddUint64(&w.clientDriver.bridgeDriver.uploadsSuccess, 1)
 		if fileRef.Size > 0 {
 			atomic.AddUint64(&w.clientDriver.bridgeDriver.totalBytesUploaded, uint64(fileRef.Size))
+		}
+
+		// Record Prometheus metrics. See issue #115.
+		if w.clientDriver.bridgeDriver.metrics != nil {
+			w.clientDriver.bridgeDriver.metrics.IncrementUploadsTotal("success")
+			// #nosec G115 -- fileRef.Size is validated non-negative by spool manager
+			w.clientDriver.bridgeDriver.metrics.AddUploadBytes(uint64(fileRef.Size))
+			w.clientDriver.bridgeDriver.metrics.ObserveUploadDuration(time.Since(w.spoolUpload.startTime), "success")
 		}
 
 		// Clean up tracking
@@ -1224,7 +1282,7 @@ func (w *uploadWriter) Close() error {
 		delete(w.clientDriver.spoolUploads, w.uploadID)
 		w.clientDriver.mu.Unlock()
 
-		atomic.AddUint64(&w.clientDriver.bridgeDriver.uploadsFailed, 1)
+		w.clientDriver.bridgeDriver.recordUploadFailure("incomplete", time.Since(w.spoolUpload.startTime))
 		return err
 	}
 }
