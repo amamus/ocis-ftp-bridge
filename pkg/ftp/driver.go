@@ -428,10 +428,10 @@ func NewBridgeDriver(
 		maxConnections:     cfg.Server.MaxConnections,
 		connectionTracker:  connTracker,
 		authAttemptTracker: authTracker,
-		authSemaphore:  make(chan struct{}, 4), // Max 4 concurrent Argon2id verifications
-		ctx:           ctx,
-		cancel:        cancel,
-		shutdownChan:  make(chan struct{}),
+		authSemaphore:      make(chan struct{}, 4), // Max 4 concurrent Argon2id verifications
+		ctx:                ctx,
+		cancel:             cancel,
+		shutdownChan:       make(chan struct{}),
 	}
 	d.startTrackerJanitor()
 	return d
@@ -1158,17 +1158,25 @@ type uploadWriter struct {
 	uploadID     string
 	upload       *spool.Upload
 	spoolUpload  *spoolUpload
-	// writeErr is the first chunk write error, if any. Close aborts the
-	// upload instead of committing a partial file when it is set.
+	// writeErr is the first error encountered during Write (chunk write
+	// failure, size violation, or cancellation). Close aborts the upload
+	// instead of committing a partial file when it is set. See issue #108.
 	writeErr error
 }
 
 // Write implements io.Writer interface
 func (w *uploadWriter) Write(p []byte) (n int, err error) {
+	// If a previous write already failed, reject further data immediately.
+	// See issue #108.
+	if w.writeErr != nil {
+		return 0, w.writeErr
+	}
+
 	// Check if upload was cancelled
 	select {
 	case <-w.upload.Context.Done():
-		return 0, ErrUploadCancelled
+		w.writeErr = ErrUploadCancelled
+		return 0, w.writeErr
 	default:
 	}
 
@@ -1178,13 +1186,15 @@ func (w *uploadWriter) Write(p []byte) (n int, err error) {
 	// Check size limits
 	remaining := w.upload.Size - w.upload.BytesReceived
 	if int64(len(p)) > remaining && w.upload.Size > 0 {
-		return 0, spool.ErrFileTooLarge
+		w.writeErr = spool.ErrFileTooLarge
+		return 0, w.writeErr
 	}
 
 	// Check account max size
 	// #nosec G115 -- AccountMaxSize is validated <= math.MaxInt64 in spool StartUpload and config validation
 	if w.upload.BytesReceived+int64(len(p)) > int64(w.upload.AccountMaxSize) {
-		return 0, spool.ErrFileTooLarge
+		w.writeErr = spool.ErrFileTooLarge
+		return 0, w.writeErr
 	}
 
 	// Write to spool
