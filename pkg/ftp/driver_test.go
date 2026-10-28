@@ -916,6 +916,55 @@ func TestUploadWriterCloseAbortsAfterWriteError(t *testing.T) {
 	}
 }
 
+// TestUploadWriterCloseAbortsOnOversize verifies that an upload that exceeds
+// the account max size is aborted on Close instead of publishing a truncated
+// file to oCIS. See issue #108.
+func TestUploadWriterCloseAbortsOnOversize(t *testing.T) {
+	mock := newMockWebDAVServer(t, nil)
+
+	spoolDir := t.TempDir()
+	spoolManager, err := spool.NewManager(spoolDir, 1024*1024)
+	if err != nil {
+		t.Fatalf("failed to create spool manager: %v", err)
+	}
+
+	// Account max size is 100 bytes (set via newCollisionTestDriver below).
+	// We override the account config to use a small MaxSize.
+	_, client := newCollisionTestDriver(t, mock, spoolManager, "overwrite", "/")
+	client.account.Upload.MaxSize = 100
+
+	w, err := client.handleUploadOpen("/oversize.bin")
+	if err != nil {
+		t.Fatalf("handleUploadOpen failed: %v", err)
+	}
+
+	// Write 60 bytes successfully, then another 60 bytes — the second write
+	// exceeds the 100-byte account max and must return ErrFileTooLarge.
+	if _, err := w.Write(make([]byte, 60)); err != nil {
+		t.Fatalf("first write failed: %v", err)
+	}
+	if _, err := w.Write(make([]byte, 60)); err == nil {
+		t.Fatal("expected write to fail when account max size is exceeded")
+	}
+
+	// Closing the oversized upload must abort it: no partial file may be
+	// committed to WebDAV and no bytes may leak in the spool.
+	closeErr := w.Close()
+	if closeErr == nil {
+		t.Fatal("expected Close to report an error for an oversized upload")
+	}
+	if got := mock.putCount(); got != 0 {
+		t.Errorf("expected no WebDAV PUT for an oversized upload, got %d", got)
+	}
+	files, err := spoolManager.ListAll()
+	if err != nil {
+		t.Fatalf("failed to list spool files: %v", err)
+	}
+	if len(files) != 0 {
+		t.Errorf("expected spool to be empty after abort, found %d files", len(files))
+	}
+}
+
 // TestHandleUploadOpenNestedPathCreatesParents verifies the QLT-002 fix
 // end to end: a STOR to a nested path must issue MKCOL for every missing
 // parent level before the PUT, because oCIS (RFC 4918) answers a PUT with a
