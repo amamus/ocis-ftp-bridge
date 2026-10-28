@@ -629,3 +629,78 @@ func TestControlOperationHasDeadline(t *testing.T) {
 	assert.Less(t, time.Since(start), time.Second,
 		"control operations must fail on their own deadline (PERF-001)")
 }
+
+// nonSeekableReader wraps a reader to hide the Seek method, simulating
+// an *os.File or streaming body where Go cannot auto-detect ContentLength.
+type nonSeekableReader struct {
+	r io.Reader
+}
+
+func (n *nonSeekableReader) Read(p []byte) (int, error) {
+	return n.r.Read(p)
+}
+
+// TestWebDAVClient_UploadStreamSetsContentLength verifies that UploadStream
+// sets req.ContentLength (not just the Content-Length header) so that Go's
+// HTTP transport sends a proper Content-Length instead of chunked encoding.
+// oCIS rejects chunked PUT requests with 400. See issue #106.
+func TestWebDAVClient_UploadStreamSetsContentLength(t *testing.T) {
+	t.Parallel()
+
+	var capturedContentLength int64
+	var capturedTransferEncoding []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedContentLength = r.ContentLength
+		capturedTransferEncoding = r.TransferEncoding
+		if r.Method == http.MethodPut {
+			w.WriteHeader(http.StatusCreated)
+		}
+	}))
+	defer server.Close()
+
+	client := NewWebDAVClient(server.URL, "user", "token")
+	ctx := context.Background()
+
+	data := []byte("hello world")
+	// Use a non-seekable reader so Go cannot auto-detect ContentLength
+	reader := &nonSeekableReader{r: bytes.NewReader(data)}
+	err := client.UploadStream(ctx, "/test.txt", reader, int64(len(data)), true)
+	require.NoError(t, err)
+
+	// ContentLength must be set to the actual size
+	assert.Equal(t, int64(len(data)), capturedContentLength,
+		"ContentLength must be set to %d, got %d", len(data), capturedContentLength)
+	// Transfer-Encoding must NOT include "chunked"
+	assert.NotContains(t, capturedTransferEncoding, "chunked",
+		"request must not use chunked transfer encoding, got: %v", capturedTransferEncoding)
+}
+
+// TestWebDAVClient_UploadStreamZeroByteSetsContentLength verifies that a
+// zero-byte upload sets ContentLength=0 (not chunked). See issue #106.
+func TestWebDAVClient_UploadStreamZeroByteSetsContentLength(t *testing.T) {
+	t.Parallel()
+
+	var capturedContentLength int64
+	var capturedTransferEncoding []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedContentLength = r.ContentLength
+		capturedTransferEncoding = r.TransferEncoding
+		if r.Method == http.MethodPut {
+			w.WriteHeader(http.StatusCreated)
+		}
+	}))
+	defer server.Close()
+
+	client := NewWebDAVClient(server.URL, "user", "token")
+	ctx := context.Background()
+
+	// Use a non-seekable reader for zero-byte upload
+	reader := &nonSeekableReader{r: bytes.NewReader([]byte{})}
+	err := client.UploadStream(ctx, "/empty.txt", reader, 0, true)
+	require.NoError(t, err)
+
+	assert.Equal(t, int64(0), capturedContentLength,
+		"ContentLength must be 0 for empty upload, got %d", capturedContentLength)
+	assert.NotContains(t, capturedTransferEncoding, "chunked",
+		"zero-byte upload must not use chunked transfer encoding, got: %v", capturedTransferEncoding)
+}
